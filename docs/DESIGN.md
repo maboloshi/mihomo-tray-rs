@@ -3,7 +3,7 @@
 Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/MetaCubeX/mihomo) 内核与其系统级代理设置。
 目标：**二进制小、内存小、依赖少**（不使用 UPX 等压缩手段），功能以「托盘能做的操作」为边界，不复刻 Clash for Windows 的完整界面。
 
-- 界面文案：走 `src/i18n.rs` 的语言表，默认中文（与既有 `mihomo-tray` Go 版一致），另内置英文；使用者可用 `lang/<系统语言>.yml` 覆盖，见 [README](../README.md) 的「界面语言」
+- 界面文案：走 `src/i18n.rs` 的语言表，默认中文（与既有 [`mihomo-tray`](https://github.com/aoiyukizakura/mihomo-tray) Go 版一致），另内置英文；使用者可用 `lang/<系统语言>.yml` 覆盖，见 [README](../README.md) 的「界面语言」
 - 代码注释 / commit / 本仓库文档语言：见 §11
 
 ---
@@ -175,19 +175,20 @@ SetMenuInfo(hmenu, &mi);
 
 ```
 Cargo.toml                  # windows-sys feature 精确到项；release profile 见 §2
-build.rs                    # 仅用于嵌入清单（或改用外部 .manifest，见 §9）
+build.rs                    # 仅用于嵌入清单（app.manifest，见 §9）
 src/main.rs                 # 单实例 → 加载设置 → 建托盘 → 消息循环；内核交给后台线程
-src/win/mod.rs              # 隐藏消息窗口、WM_APP 分发、TaskbarCreated 重注册
-src/win/tray.rs             # Shell_NotifyIconW ADD/MODIFY/DELETE、tooltip、图标切换
+src/win/mod.rs              # 隐藏消息窗口、WM_APP 分发、TaskbarCreated 重注册、托盘图标（Shell_NotifyIconW）
 src/win/menu.rs             # 菜单构建、id 表、TrackPopupMenuEx、深色模式
 src/win/proxy.rs            # 系统代理注册表 + InternetSetOptionW(39/37)
 src/win/autostart.rs        # HKCU Run
 src/win/elevate.rs          # 提权副本的参数（只有一个 PID）+ ShellExecuteExW("runas") + 等退出码
+src/win/shell.rs            # ShellExecuteW：把 URL 交给默认浏览器
 src/mihomo/api.rs           # WinHTTP 客户端 + 上述端点
-src/mihomo/discover.rs      # §4 的三条发现链 + `-d <配置目录>`
+src/mihomo/discover.rs      # §4 的三条发现链 + `-d <配置目录>` / `-f <配置文件>`
 src/mihomo/proc.rs          # 启动/停止内核（只停路径匹配的 PID）+ 提权副本主体（按 PID 读映像/命令行）
 src/settings.rs             # tray.yml 读取（极简 YAML 子集）
-src/state.rs                # 状态结构 + 内核路径/句柄槽 + 唤醒 UI
+src/i18n.rs                 # 界面语言表（内置 zh-CN/en-US）+ lang/<系统标签>.yml 叠加
+src/state.rs                # 状态结构 + 内核路径/句柄槽
 src/icon.rs                 # RGBA → HICON（多尺寸、状态色）
 ```
 
@@ -200,8 +201,8 @@ src/icon.rs                 # RGBA → HICON（多尺寸、状态色）
 
 ## 7. 设置文件 `tray.yml`
 
-位置：exe 同目录优先（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`；也可 `--config <path>` 指定。
-解析：`key: value`、一层嵌套、`#` 注释、`"` 或 `'` 引号；不支持列表内联/锚点/多行块。
+位置：exe 同目录优先（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`。
+解析：`key: value`、一层嵌套、`#` 注释、`"` 或 `'` 引号；不支持列表内联以外的 YAML 特性（无锚点、无多行块）、不支持列表跨行。文件可带 UTF-8 BOM；引号只在同一行内有配对时才开启，所以 `don't` 这样的撇号不会把行尾注释吞进值里。`https://` 前缀会被去掉，控制器一律按明文 http 连（见 §8 已知限制）。
 
 ```yaml
 mihomo:
@@ -214,8 +215,8 @@ controller:
   secret: ""
   timeout_ms: 2000
 proxy:
-  bypass: []              # 追加到 ProxyOverride（始终包含 <local>）
-  system_proxy_on_exit: keep   # keep | disable
+  bypass: []              # 追加到 ProxyOverride（仅在它不存在时写入，已有列表不覆盖）
+  system_proxy_on_exit: keep   # 预留（Phase 2 未实现，当前一律「退出时保持现状」）
 groups:
   order: []               # 显式排序；其余按字典序
   include: []             # 留空 = 全部 Selector
@@ -242,12 +243,13 @@ ui:
 - 停内核按**家族**停（[proc.rs](../src/mihomo/proc.rs) `family`）：scoop shim 也叫 `mihomo.exe`、真内核是它的子进程，只按映像路径杀会留下真内核；家族只从"已匹配到的那一个进程"向上找 `mihomo.exe` 父、向下找子，不会牵连无关进程。
 - 判定"是否停掉了"不看分类而看结果：只要还有**路径匹配**或**路径读不出来（可能就是我们提权后的那个）**的进程，就交给提权副本；**可读但路径不同的实例是别人的内核，永远不交给副本**（不弹 UAC、不误杀），托盘直接退出。
 - 提权副本是同一个 exe 的隐藏模式，在任何单实例/窗口逻辑之前处理；托盘进程自身永远不提权，也不预置计划任务（计划任务服务可能被禁用）。
-- 系统代理：默认「退出时保持现状」（`keep`）；开启前保存 `ProxyServer`/`ProxyOverride` 快照，便于 Phase 2 的还原。
+- 系统代理：默认「退出时保持现状」（不保存原值、退出时不改写）；`ProxyOverride` **只在注册表里没有该值时才写入**（`bypass` + `<local>`），用户自己整理过的列表不会被覆盖。
 - **已知限制**（都由"只有内核需要提权"这一件事决定，不是缺陷）：
   - UAC 若用**另一个管理员账户**的凭据授权，副本以那个账户身份运行，读不到也停不掉本账户的内核（回 `-2`/`-5`）；这种机器上只能人工以管理员权限启动内核。
   - 副本复用**内核自己的命令行**，所以"只存在于环境变量里"的配置（`CLASH_HOME_DIR`、`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET`）不会跟着提权过 UAC；要可靠就用 `tray.yml` 的 `mihomo.args`。
   - 记录的 PID 只在本会话内有效（跨托盘重启靠路径身份兜底）；PID 号被复用的窗口极小，但仍以"它还在 `mihomo.exe` 列表里"为唯一校验。
   - 关闭 TUN **不回读**（开启必须回读）：静默失败只会表现为菜单勾选状态没变。
+  - **控制器只按明文 http 访问**：`Client::new` 会去掉 `http://`/`https://` 前缀，WinHTTP 请求不带 `WINHTTP_FLAG_SECURE`。控制器在本机回环上时这不是问题（mihomo 的 `external-controller` 本身就是明文 http）；跨机需要加密时自行套隧道。
 
 ---
 
@@ -276,10 +278,10 @@ ui:
 2. **worker 先刷新再等待**：原实现先 `recv_timeout(poll)` 再刷新，导致首个菜单（3 s 前打开）显示空状态；现改为循环开头立刻刷新，实现中实测发现并修复。
 3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`，无资源文件、无图像库。
 4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
-5. **实测体积/内存**：exe 362 KB（i18n 之前 338 KB，增量见 §11.7），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
-6. **单测 30 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退。
-7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（51 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
-   **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB），远高于动工前估的 3–4 KB——语言表本体、51 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（51 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
+5. **实测体积/内存**：exe 373 KB（381,952 B；i18n 之前 338 KB，增量见 §11.7），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
+6. **单测 52 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退；设置层断言子集解析的边界（BOM、撇号、引号内逗号、路径与 CJK 值）。
+7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（62 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
+   **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB，当时的数字），远高于动工前估的 3–4 KB——语言表本体、62 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（62 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
 
 ### 代码审查修复（第二轮，10 项 must-fix + 若干 should-fix）
 
@@ -299,10 +301,28 @@ ui:
 | 响应体无上限缓冲 | 8 MiB 上限，超出报「响应过大」 |
 | 其它 | 中毒锁 `into_inner`、`WM_DESTROY` 删除图标、`NIM_SETVERSION` 失败即重试、uxtheme 优先按名取、mihomo 配置注释剥离识别引号、`Menu` 实现 `Drop`、启动等待内核限定 5 s 预算 |
 
+### 代码审查修复（第三轮，发布前）
+
+| 问题 | 修复 |
+|---|---|
+| UTF-8 BOM 让 `tray.yml` / `lang/<tag>.yml` 的第一节变成 `\u{feff}mihomo`、`\u{feff}menu`，其下所有键静默失效 | 两个解析器都先 `strip_bom` |
+| 未加引号的撇号（`don't`）开启了一个永不闭合的引号串，行尾注释被并进值里 | 只有同一行内存在配对的引号时才开启引号区 |
+| `["a,b"]` 被切成两个条目 | 只按引号外的逗号切分 |
+| `-f` 只在 `tray.yml` 显式指定时补，`CLASH_CONFIG_FILE` 指向的非默认文件名不会告诉内核，内核于是去读 `-d` 下的 `config.yaml`（不是托盘刚读过的那份） | 文件名不是 `config.yaml` 就补 `-f`（显式配置一律补） |
+| `controller_from_config` 不区分缩进，嵌套的 `secret:` 会覆盖控制器的 | 只认顶层键 |
+| 内核在"列出进程"和"终止"之间退出时，`TerminateProcess` 对已退出进程同样返回 access-denied，被记成"拒绝" → 中止其余终止、提权重启失败 | 用进程对象是否已 signaling 区分"已退出"与"无权"；`OpenProcess` 报 87 也按已退出处理 |
+| 命令行无参数时 `argv[1..]` 越界 panic（提权副本路径） | 改用 `get(1..)` |
+| `is_shim` 用子串匹配，`shims-backup` 被误判为 scoop shim | 按父目录名是否为 `shims` 判断 |
+| `WinHttpQueryHeaders` 返回值被忽略，失败时状态码停在 0，界面显示 "HTTP 0" | 查询失败即报请求失败 |
+| `CreateMutexW` 成功时不重置 last error，线程此前留下的 `ERROR_ALREADY_EXISTS` 会让第一个实例误判"已在运行"而静默退出 | 调用前 `SetLastError(0)` |
+| `ProxyOverride` 读不出字符串就被当成空并覆盖 | 只看该值是否存在，存在就保持原样 |
+
+同轮记录、**未在本次修复**的差距见 [ROADMAP.md](ROADMAP.md) 的「已知差距」。
+
 ### 尚未在自动化中验证、需人工确认的两点
 
 - **菜单内的鼠标交互**（悬停展开子菜单、悬停/点击滚动箭头）：自动化向托盘图标窗口 `PostMessage` 弹出菜单时，隐藏窗口拿不到前台激活权，模拟输入无法驱动系统菜单内部循环。滚动箭头的**存在与状态**已验证（`docs/assets/native-menu-scroll-arrows.png`），真实点击托盘图标时应正常。
-- **`PUT /configs?force=true`** 未在本机正在运行的内核上执行（避免改动用户正在使用的代理状态），仅依据上游源码（`hub/route/configs.go:408-444`）与 Go 版既有实现。
+- **`PUT /configs?force=true`** 未在本机正在运行的内核上执行（避免改动用户正在使用的代理状态），仅依据上游源码（`hub/route/configs.go:408-444`）与 Go 版（[aoiyukizakura/mihomo-tray](https://github.com/aoiyukizakura/mihomo-tray)）既有实现。
 
 完整待办与人工验证清单见 [ROADMAP.md](ROADMAP.md)。
 

@@ -37,7 +37,7 @@ cargo test                 # 设置解析 / URL 编码 / 地址解析的单测
 
 | 指标 | 数值 |
 |---|---|
-| 可执行文件 | ~353 KiB (实测 361,984 B) |
+| 可执行文件 | ~373 KiB (实测 381,952 B) |
 | 空闲私有内存 | ~3.3 MB（含 WinHTTP 内部线程） |
 | 空闲工作集 | ~18 MB（多为共享 DLL 页） |
 | 依赖 | `windows-sys`、`serde_json`、`winreg`（+ 构建期无依赖） |
@@ -112,12 +112,22 @@ ui:
 - 只读组（`LoadBalance` 与普通节点）的成员不可点击，仅展示当前值。
 - `URLTest`/`Fallback` 组被点选后会进入「已固定」状态（组名带 `· 已固定`），此时内核不再自动测速换节点；用组内的「自动（取消固定）」（`DELETE /proxies/{name}`）恢复自动选择。固定状态由内核写进它自己的缓存，重载配置也会清除。
 - **面板是本程序之外的东西**：「打开 Web 面板」只是把地址交给默认浏览器。要内核自己伺服一份静态面板，得在 mihomo 里配 `external-ui`（那份文件挂在控制器的 `/ui/` 下，正是默认地址）；用外部托管的面板（zashboard、metacubexd 等）则**不需要改 mihomo**，只要 `external-controller` 可达、在面板里填地址与 secret 即可——但那个页面与内核不同源时，mihomo 的 `external-controller-cors.allow-origins` 必须放行该来源，否则浏览器会拦在 CORS 上。控制器不可达时这一项与其他操作项一样灰显。
+- **控制器只按明文 http 访问**：`controller.address` 写 `host:port` 或 `http://host:port` 都行，但 **写成 `https://host:port` 也会去掉前缀、照旧按明文 http 连**（不启用 WinHTTP 的 TLS 标志）。控制器通常就在本机回环上；需要跨机加密时请自行套 SSH 隧道或用托管面板的 https 地址。
 - Windows 11 默认把新的托盘图标收进溢出区，首次运行需要手动把它拖到任务栏固定。
 - 本程序（托盘）始终以普通权限运行；只有 TUN 需要管理员权限：点「TUN 模式」而内核没能建起 Wintun 时，弹一次 UAC 让内核变成提权实例，托盘自身不提权。
 
-## 与 Go 版 `mihomo-tray` 的差异
+## 与 Go 版 [`mihomo-tray`](https://github.com/aoiyukizakura/mihomo-tray) 的差异
 
-不做：设置窗口、自绘弹窗、节点延迟色点、流量曲线、订阅刷新、脚本执行；需要图形化的设置就用内核自己的面板（菜单里的「打开 Web 面板」）。
-另外：停止内核只结束本程序启动或路径匹配的实例（Go 版用 `taskkill /IM mihomo.exe` 会误杀其他实例）；重载与状态读取均走控制器 API。
+指 [aoiyukizakura/mihomo-tray](https://github.com/aoiyukizakura/mihomo-tray)（Go + systray，本程序即其思路的 Rust 重写）。相对它的不同：
+
+- **托盘自身不提权**：Go 版启动时就用 `ShellExecute("runas")` 把整个程序提权；这里托盘始终普通权限，只有 TUN 需要管理员，由一次性提权副本重启内核（见「已知行为」）。
+- **停止内核只结束本程序启动或路径匹配的实例**：Go 版用 `taskkill /IM mihomo.exe`，会误杀其他实例。
+- **不只认写死的路径**：Go 版固定读 `%USERPROFILE%\.config\mihomo\config.yaml`、只在 PATH / 程序目录 / `~/scoop/shims` 找内核；这里是三层发现链，并支持 `tray.yml` 指定（见「自动发现」）。
+- **新增**：代理分组子菜单（含 `URLTest`/`Fallback` 固定与取消固定）、「打开 Web 面板」、界面语言表与 `lang/*.yml`、可配轮询间隔（Go 版固定 5 s）。
+- **同样不做**（相对 CFW 式图形客户端）：设置窗口、自绘弹窗、节点延迟色点、流量曲线、订阅刷新、脚本执行；需要图形化的设置就用内核自己的面板（菜单里的「打开 Web 面板」）。
 
 设计文档见 [docs/DESIGN.md](docs/DESIGN.md)。
+
+## 许可证
+
+[MIT](LICENSE)

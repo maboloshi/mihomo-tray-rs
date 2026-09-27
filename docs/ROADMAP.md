@@ -8,8 +8,8 @@ Phase 1（MVP）已实现并真机验证：
 
 - 9 项菜单功能（状态行 / 系统代理 / 代理模式 / TUN / 代理分组 / 开机自启动 / 重载配置 / 打开 Web 面板 / 退出两项）全部可用
 - 三层发现链（内核 exe、配置文件、控制器地址）在「配置文件里没有 `external-controller`、地址由环境变量注入」的机器上仍能正确定位
-- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿
-- 实测：exe ~353 KiB（361,984 B）；空闲私有内存 2.6–3.4 MB，工作集 ~15 MB
+- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（52 个单测）
+- 实测：exe 373 KiB（381,952 B）；空闲私有内存 2.6–3.4 MB，工作集 ~15 MB
 - 验证方式：真机运行截图（`assets/app-menu-light.png`）+ 分组数据逐项比对 live API + 长列表滚动箭头（`assets/native-menu-scroll-arrows.png`）
 
 ## 需要人工点一遍的清单（自动化覆盖不到）
@@ -30,6 +30,24 @@ Phase 1（MVP）已实现并真机验证：
 | 12 | `ui.web_url` 指向托管面板（如 `https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}`） | 打开的页面已连上当前内核；若浏览器报 CORS，需在内核的 `external-controller-cors.allow-origins` 里放行该来源 |
 
 > 说明：自动化向隐藏窗口 `PostMessage` 弹出菜单时，窗口拿不到前台激活权，模拟鼠标/键盘无法驱动系统菜单内部循环，因此第 1、2 项必须人工确认。
+
+## 已知差距（发布前审查记录，未修复）
+
+均为审查确认存在、但影响面小或需要真机交互验证才能定论的问题，留待后续：
+
+| # | 位置 | 问题 | 影响 |
+|---|---|---|---|
+| 1 | `src/mihomo/api.rs` `Client::new` | `https://` 前缀被去掉后按明文 http 连（不带 `WINHTTP_FLAG_SECURE`） | 已在 README/DESIGN §8 记为已知限制；要支持 TLS 需加 secure 标志与证书策略 |
+| 2 | `src/win/mod.rs` `TrackPopupMenuEx` | 未带 `TPM_WORKAREA`，长状态/错误行只靠锚点钳制 | 菜单可能横向越出工作区；需真机点一次确认是否真发生 |
+| 3 | `src/win/mod.rs` `on_tray_event` | 只处理 `WM_*BUTTONUP`/`WM_CONTEXTMENU`，未处理 `NIN_SELECT`/`NIN_KEYSELECT`，也未在取消后 `NIM_SETFOCUS` | 键盘（空格/回车）无法打开菜单；需真机验证 |
+| 4 | `src/app.rs` `on_taskbar_created` | 图标像素尺寸只在 `Icons::new()` 取一次；主显示器 DPI 变化时 `TaskbarCreated` 也会广播 | 重新注册的图标可能按旧尺寸缩放而偏糊 |
+| 5 | `src/win/autostart.rs` `is_enabled` | 只判断 `Run` 值是否存在，不比对当前 exe 路径 | 程序被移动后仍显示"已开启" |
+| 6 | `src/win/menu.rs` | `AppendMenuW`/`CreatePopupMenu` 失败未检查 | 极端情况下菜单静默少项 |
+| 7 | `src/mihomo/proc.rs` `image_path` | 520 单元缓冲区不够长（>520 字符的映像路径）时记为"不可核验" | 会被当成"可能是我们的内核"，多弹一次 UAC |
+| 8 | `src/settings.rs` `page_size` | 未像 `timeout_ms`/`poll_interval_ms` 那样钳制，非数字静默变 0 | 无实际危害，仅缺诊断 |
+| 9 | `src/i18n.rs` `fallback` | 语言文件存在但为空/节名写错时，叠加在 en-US 之上 | 中文系统的用户文件写错会看到英文界面（README 已说明回退规则） |
+| 10 | `src/i18n.rs` `fill` | 占位符从左到右整体替换，组名里含 `{kind}` 这类文本会被交叉替换 | 面板/分组名恰好含占位符文本时显示异常 |
+| 11 | `src/main.rs` | 第二个实例静默退出，不提示 | Windows 11 托盘溢出区里用户可能以为"没启动" |
 
 ## Phase 2 候选（按价值/成本）
 
