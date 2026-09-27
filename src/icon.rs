@@ -15,11 +15,27 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const GRAY: [u8; 3] = [0x88, 0x88, 0x88];
 const GREEN: [u8; 3] = [0x4C, 0xAF, 0x50];
+const AMBER: [u8; 3] = [0xFF, 0x98, 0x00];
 const BLUE: [u8; 3] = [0x21, 0x96, 0xF3];
+
+/// What the tray icon shows. "The kernel is usable" and the two ways of taking
+/// traffic over are three different things, so they get three different colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// The controller does not answer: the kernel is not usable.
+    Unreachable,
+    /// The kernel answers, and nothing is being taken over.
+    Ready,
+    /// The system proxy is on.
+    SystemProxy,
+    /// TUN is on.
+    Tun,
+}
 
 pub struct Icons {
     pub gray: HICON,
     pub green: HICON,
+    pub amber: HICON,
     pub blue: HICON,
 }
 
@@ -29,18 +45,19 @@ impl Icons {
         Self {
             gray: make_icon(&render(GRAY, size as usize), size),
             green: make_icon(&render(GREEN, size as usize), size),
+            amber: make_icon(&render(AMBER, size as usize), size),
             blue: make_icon(&render(BLUE, size as usize), size),
         }
     }
 
-    /// TUN wins over the proxy colour, matching the classic tray behaviour.
-    pub fn for_state(&self, tun: bool, proxying: bool) -> HICON {
-        if tun {
-            self.blue
-        } else if proxying {
-            self.green
-        } else {
-            self.gray
+    /// TUN wins over the system proxy and both win over a plainly usable kernel,
+    /// matching the classic tray behaviour.
+    pub fn for_state(&self, state: State) -> HICON {
+        match state {
+            State::Tun => self.blue,
+            State::SystemProxy => self.amber,
+            State::Ready => self.green,
+            State::Unreachable => self.gray,
         }
     }
 }
@@ -50,6 +67,7 @@ impl Drop for Icons {
         unsafe {
             DestroyIcon(self.gray);
             DestroyIcon(self.green);
+            DestroyIcon(self.amber);
             DestroyIcon(self.blue);
         }
     }

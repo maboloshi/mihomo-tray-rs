@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::i18n;
-use crate::icon::Icons;
+use crate::icon::{Icons, State};
 use crate::mihomo::{Client, discover, proc};
 use crate::settings::Settings;
 use crate::state::{self, KernelSlot, Shared, Snapshot};
@@ -97,13 +97,9 @@ impl App {
         }
     }
 
-    fn proxying(&self, snapshot: &Snapshot) -> bool {
-        snapshot.sysproxy && snapshot.controller_ok
-    }
-
     pub fn refresh_ui(&mut self) {
         let snapshot = state::read(&self.state);
-        let icon = self.icons.for_state(snapshot.tun, self.proxying(&snapshot));
+        let icon = self.icons.for_state(icon_state(&snapshot));
         if self.icon_ready {
             win::update_icon(self.hwnd, icon, &tooltip(&snapshot));
         } else {
@@ -112,7 +108,7 @@ impl App {
     }
     pub fn on_taskbar_created(&mut self) {
         let snapshot = state::read(&self.state);
-        let icon = self.icons.for_state(snapshot.tun, self.proxying(&snapshot));
+        let icon = self.icons.for_state(icon_state(&snapshot));
         self.icon_ready = win::add_icon(self.hwnd, icon, &tooltip(&snapshot));
     }
 
@@ -656,6 +652,23 @@ fn refresh(client: &Client, shared: &Shared, version: &mut String, outcome: Outc
     state::write(shared, snapshot);
 }
 
+/// What the icon shows, from what the last refresh saw.
+///
+/// TUN beats the system proxy and both beat a kernel that only answers. A kernel
+/// that does not answer beats everything: a registry entry claiming the system
+/// proxy is on while nothing serves it is exactly what the user has to see.
+fn icon_state(snapshot: &Snapshot) -> State {
+    if !snapshot.controller_ok {
+        State::Unreachable
+    } else if snapshot.tun {
+        State::Tun
+    } else if snapshot.sysproxy {
+        State::SystemProxy
+    } else {
+        State::Ready
+    }
+}
+
 fn tooltip(snapshot: &Snapshot) -> String {
     let messages = i18n::t();
     let mut text = String::from("mihomo-tray\n");
@@ -700,6 +713,41 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn the_icon_shows_the_strongest_state() {
+        let dead = Snapshot::default();
+        assert_eq!(icon_state(&dead), State::Unreachable);
+
+        let ready = Snapshot {
+            controller_ok: true,
+            ..Default::default()
+        };
+        assert_eq!(icon_state(&ready), State::Ready);
+
+        let proxied = Snapshot {
+            controller_ok: true,
+            sysproxy: true,
+            ..Default::default()
+        };
+        assert_eq!(icon_state(&proxied), State::SystemProxy);
+
+        let tunnelled = Snapshot {
+            controller_ok: true,
+            sysproxy: true,
+            tun: true,
+            ..Default::default()
+        };
+        assert_eq!(icon_state(&tunnelled), State::Tun);
+
+        // What the registry says proves nothing while the kernel is not answering.
+        let lying = Snapshot {
+            sysproxy: true,
+            tun: true,
+            ..Default::default()
+        };
+        assert_eq!(icon_state(&lying), State::Unreachable);
+    }
 
     fn process(pid: u32, path: &str, denied: bool) -> proc::Process {
         proc::Process {
