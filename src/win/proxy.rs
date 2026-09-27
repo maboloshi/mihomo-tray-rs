@@ -35,9 +35,15 @@ pub fn enable(port: u16, extra_bypass: &[String]) -> Result<(), String> {
     key.set_value("ProxyServer", &format!("127.0.0.1:{port}"))
         .map_err(|e| i18n::t().error_set_proxy_server(&e.to_string()))?;
 
-    // Keep a bypass list the user already curated; only seed it when empty.
-    let existing: String = key.get_value("ProxyOverride").unwrap_or_default();
-    if existing.trim().is_empty() {
+    // Keep a bypass list the user already curated; only seed it when there is
+    // none. A value that exists but cannot be read as a string counts as curated
+    // too: it is the user's, and overwriting it would lose entries this program
+    // never understood in the first place.
+    let curated = match key.get_raw_value("ProxyOverride") {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    };
+    if !curated {
         let mut entries: Vec<String> = extra_bypass
             .iter()
             .map(|s| s.trim().to_string())

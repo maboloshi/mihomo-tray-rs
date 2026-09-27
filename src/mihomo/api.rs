@@ -125,14 +125,14 @@ impl Client {
                     {
                         let mut status: u32 = 0;
                         let mut size = std::mem::size_of::<u32>() as u32;
-                        WinHttpQueryHeaders(
+                        let have_status = WinHttpQueryHeaders(
                             request,
                             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                             std::ptr::null(),
                             &mut status as *mut u32 as *mut core::ffi::c_void,
                             &mut size,
                             std::ptr::null_mut(),
-                        );
+                        ) != 0;
 
                         // Bound the body: a wrong or wedged listener on the
                         // controller port must not be able to exhaust memory.
@@ -166,7 +166,11 @@ impl Client {
                             }
                             buf.extend_from_slice(&chunk[..read as usize]);
                         }
-                        result = if overflow {
+                        result = if !have_status {
+                            // No status line to report: saying "HTTP 0" would be a
+                            // made-up answer about a request that did not complete.
+                            Err(i18n::t().error_http_request_failed.to_string())
+                        } else if overflow {
                             Err(i18n::t().error_response_too_large.to_string())
                         } else {
                             Ok((status as u16, String::from_utf8_lossy(&buf).into_owned()))

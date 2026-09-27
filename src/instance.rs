@@ -5,7 +5,9 @@
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, SetLastError,
+};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 
 static HANDLE: AtomicIsize = AtomicIsize::new(0);
@@ -23,6 +25,10 @@ pub fn acquire() -> bool {
         .chain(std::iter::once(0))
         .collect();
     unsafe {
+        // `CreateMutexW` leaves the last error untouched when it creates the
+        // mutex, so a stale `ERROR_ALREADY_EXISTS` from anything this thread did
+        // earlier would make the first instance exit as if it were a second one.
+        SetLastError(0);
         let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
         if handle.is_null() {
             // Cannot even query the guard: better to keep running than to swallow
