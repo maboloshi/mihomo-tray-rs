@@ -149,6 +149,25 @@ SetMenuInfo(hmenu, &mi);
 | （Phase 2）测速 | `GET /group/{name}/delay?timeout=3000&url=…` | 实测返回 `{"成员":延迟}`，并让 `/proxies` 出现 `history` |
 | （Phase 2）关闭连接 | `DELETE /connections` | |
 
+### 5.1 Windows 侧的坑（本轮全部实测过）
+
+| 坑 | 现象 / 证据 | 结论 |
+|---|---|---|
+| 进程映像路径是**解析后**的真实路径 | 用 junction 拼写启动 `apps\mihomo-v3\current\mihomo.exe`，进程报告 `apps\mihomo-v3\1.19.31\mihomo.exe`（`GetFinalPathNameByHandleW` 两种拼写解析结果一致） | 任何"路径即身份"的比较都必须 `canonicalize` + 忽略大小写（`proc::same_image`）；直接比字符串**永远不相等** |
+| scoop shim 也叫 `mihomo.exe` | 枚举里同时出现 shim 与真内核，且真内核是 shim 的**子进程**；按映像路径杀只会杀掉 shim | 停内核要按**父子家族**收敛（`proc::family`），不能只看名字或单个路径 |
+| `runas` 不继承调用者的进程环境 | 提权副本里看不到 `CLASH_HOME_DIR`、`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET` | 提权重启只能靠**内核自己的命令行**；只写在环境变量里的配置要挪进 `tray.yml`/`mihomo.args` |
+| `runas` 可能以**另一个账户**授权 | 凭据式授权时副本属于另一个用户，读/杀本账户的内核会被拒 | 固有边界，无解；这种机器上只能人工以管理员权限启动内核（§8 已知限制） |
+| 退出码是 32 位 | `GetExitCodeProcess` 拿得到完整值（`%ERRORLEVEL%`/`cmd` 会截断到 8 位） | 可用"正数 = PID、负数 = 错误"回传结果；**不要**改成"由调用者指定路径写文件"——那等于给低权限进程一个提权写文件原语 |
+| 高完整性级别进程：句柄能开、路径可能被拒 | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 成功，`QueryFullProcessImageNameW` 失败 | 这种进程记为**不可核验**，不能归进"不是我们的"——否则会得出"没有可停的了"的假结论 |
+| 终止需要同级权限 | 同用户同 IL 可直接 `TerminateProcess`；跨 IL 被拒 | "没提权能杀、提权后杀不掉"就是这条；UAC 只在该弹时弹 |
+| 读目标进程的命令行 | `NtQueryInformationProcess(ProcessCommandLineInformation = 60)` 把命令行拷进**调用者自己的缓冲区**，无需 PEB、与目标位数无关；返回的 `UNICODE_STRING` 落在字节缓冲里 | "原样重启内核"最可靠的来源；读这个结构要用 `read_unaligned` |
+| `ShellExecuteExW` 的引用规则 | `lpFile` 由 shell 自己正确加引号（带空格的 exe 路径实测 OK）；`lpParameters` 必须自己按 `CommandLineToArgvW` 的规则引用 | 参数拼装要有 round-trip 单测；`SEE_MASK_NOASYNC` 才不依赖调用线程的消息泵 |
+
+**流程上的两条教训（本轮来回三次的根因）**
+
+1. **先量后设计**：涉及进程身份/权限/路径的判断，先在同一台机器上实测一次 Win32 行为（映像路径、token、端口归属），再写逻辑。本轮依次猜"shim 拓扑"、猜"分类判定"，最后量到**路径身份**才是真根因。
+2. **不要拿间接信号当结论**：`stopped > 0`、`denied > 0`、子句柄、菜单勾选状态都曾造成"成功"假象；结论只能落在"进程还在不在"或"权威方（提权副本）怎么说"。
+
 ---
 
 ## 6. 模块与线程模型
