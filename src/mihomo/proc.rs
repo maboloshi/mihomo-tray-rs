@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -22,6 +22,9 @@ const KERNEL_EXE: &str = "mihomo.exe";
 /// `OpenProcess` failing with this is how a higher-integrity process says "not
 /// yours to look at"; anything else is a process that simply went away.
 const ERROR_ACCESS_DENIED: u32 = 5;
+/// `OpenProcess` failing with this means the PID is not a running process: the
+/// one that was listed has exited in the meantime.
+const ERROR_INVALID_PARAMETER: u32 = 87;
 /// How long to wait for a terminated kernel to disappear. The replacement binds
 /// the same ports right afterwards, so a half-dead listener must not linger.
 const TERMINATE_WAIT_MS: u32 = 5_000;
@@ -92,9 +95,9 @@ pub fn same_image(a: &Path, b: &Path) -> bool {
 /// (`shims\mihomo.exe`) and starts the real binary as its child, so it is not the
 /// kernel a caller is looking for.
 pub fn is_shim(path: &Path) -> bool {
-    path.to_string_lossy()
-        .to_ascii_lowercase()
-        .contains(r"scoop\shims")
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name.eq_ignore_ascii_case("shims"))
 }
 
 /// All running `mihomo.exe` processes, with their real image paths.
@@ -182,6 +185,7 @@ pub fn start(exe: &Path, args: &[String]) -> Result<Child, String> {
 }
 
 /// Why a process could not be terminated.
+#[derive(Debug)]
 enum KillError {
     /// The process runs with higher rights than this one.
     Denied,
@@ -194,20 +198,30 @@ fn kill(pid: u32) -> Result<(), KillError> {
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
         if handle.is_null() {
-            return Err(if GetLastError() == ERROR_ACCESS_DENIED {
-                KillError::Denied
-            } else {
-                KillError::Failed(i18n::t().error_open_process(pid))
-            });
+            return match GetLastError() {
+                ERROR_ACCESS_DENIED => Err(KillError::Denied),
+                // The PID is not a running process any more: it exited between the
+                // listing and this call, which is the outcome the caller wanted.
+                // Reported as a failure it would abort the remaining kills and
+                // block the kernel replacement that follows them.
+                ERROR_INVALID_PARAMETER => Ok(()),
+                _ => Err(KillError::Failed(i18n::t().error_open_process(pid))),
+            };
         }
         let ok = TerminateProcess(handle, 0);
-        let denied = ok == 0 && GetLastError() == ERROR_ACCESS_DENIED;
+        // Read before anything else overwrites it.
+        let termination_error = GetLastError();
+        // A kernel that exited between the listing and here refuses termination
+        // with the same access-denied the kernel uses for a process of higher
+        // integrity, and only the process object itself tells the two apart: it is
+        // signalled for a process that is gone, not for one that is out of reach.
+        let exited = ok == 0 && WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
         if ok != 0 {
             WaitForSingleObject(handle, TERMINATE_WAIT_MS);
         }
         CloseHandle(handle);
-        if ok == 0 {
-            return Err(if denied {
+        if ok == 0 && !exited {
+            return Err(if termination_error == ERROR_ACCESS_DENIED {
                 KillError::Denied
             } else {
                 KillError::Failed(i18n::t().error_kill_process(pid))
@@ -322,8 +336,11 @@ pub fn start_kernel_elevated(args: &[String]) -> i32 {
         return HELPER_BAD_ARGS;
     };
     // Read before stopping anything: the command line of a process that is gone
-    // cannot be read any more.
-    let Some(kernel_args) = command_line(pid).map(|argv| argv[1..].to_vec()) else {
+    // cannot be read any more. A kernel started without arguments has none to
+    // carry over, which is `Some(&[])`, not an unreadable command line.
+    let Some(kernel_args) =
+        command_line(pid).and_then(|argv| argv.get(1..).map(<[String]>::to_vec))
+    else {
         return HELPER_UNREADABLE;
     };
     match stop_kernel(Some(pid), &exe) {
@@ -617,5 +634,32 @@ mod tests {
         assert!(!is_shim(Path::new(
             r"D:\App\Scoop\apps\mihomo-v3\current\mihomo.exe"
         )));
+        // Only a directory named `shims` is the launcher's; a name that merely
+        // contains it is an ordinary kernel.
+        assert!(!is_shim(Path::new(r"D:\App\Scoop\shims-backup\mihomo.exe")));
+    }
+
+    #[test]
+    fn a_process_that_exited_is_already_stopped() {
+        // The PID is released before this runs, which is exactly the race between
+        // listing the kernels and terminating them: a gone process must count as
+        // stopped, not as a failure that aborts the rest.
+        let mut child = Command::new("cmd.exe")
+            .args(["/c", "exit"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a short-lived process");
+        let pid = child.id();
+        child.wait().expect("wait for it to exit");
+        // The handle `Child` holds keeps the process object alive, and with it the
+        // PID: only once it is closed is this PID as gone as the one a stale
+        // listing hands to `kill`.
+        drop(child);
+        let outcome = kill(pid);
+        assert!(
+            matches!(outcome, Ok(())),
+            "kill of an exited pid: {outcome:?}"
+        );
     }
 }

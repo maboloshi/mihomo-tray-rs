@@ -14,6 +14,9 @@ use crate::settings::Settings;
 
 const DEFAULT_PORTS: [u16; 5] = [9090, 9091, 9097, 9098, 6170];
 
+/// The name mihomo looks for under `-d` when it is not told a file.
+const CONFIG_FILE_NAME: &str = "config.yaml";
+
 fn exe_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()?
@@ -90,7 +93,7 @@ pub fn config_candidates(settings: &Settings) -> Vec<PathBuf> {
     if !settings.mihomo_config.is_empty() {
         out.push(PathBuf::from(&settings.mihomo_config));
     }
-    let file_name = std::env::var("CLASH_CONFIG_FILE").unwrap_or_else(|_| "config.yaml".into());
+    let file_name = std::env::var("CLASH_CONFIG_FILE").unwrap_or_else(|_| CONFIG_FILE_NAME.into());
     if let Ok(dir) = std::env::var("CLASH_HOME_DIR") {
         out.push(PathBuf::from(dir).join(&file_name));
     }
@@ -98,7 +101,7 @@ pub fn config_candidates(settings: &Settings) -> Vec<PathBuf> {
         out.push(home.join(".config").join("mihomo").join(&file_name));
     }
     if let Some(dir) = exe_dir() {
-        out.push(dir.join("config.yaml"));
+        out.push(dir.join(CONFIG_FILE_NAME));
     }
     out
 }
@@ -115,8 +118,10 @@ pub fn config_candidates(settings: &Settings) -> Vec<PathBuf> {
 ///   geodata. It matters because an elevated kernel may run under another account,
 ///   where `%USERPROFILE%` — and with it mihomo's own default directory — is not
 ///   the one the tray just read.
-/// * `-f <file>` — an explicitly configured file is not necessarily called
-///   `config.yaml`, and `-d` alone would make the kernel look for that name.
+/// * `-f <file>` — a file that is not called `config.yaml` has to be named, and
+///   the kernel would otherwise read another one than the tray did. That covers
+///   `mihomo.config` as well as a `CLASH_CONFIG_FILE` name found under
+///   `CLASH_HOME_DIR` or `~/.config/mihomo`.
 pub fn launch_args(settings: &Settings) -> Vec<String> {
     let explicit = (!settings.mihomo_config.is_empty())
         .then(|| PathBuf::from(&settings.mihomo_config))
@@ -136,11 +141,20 @@ pub fn launch_args(settings: &Settings) -> Vec<String> {
             args.push(dir.display().to_string());
         }
     }
-    if explicit.is_some() && !names_flag(&args, "f") {
+    if needs_config_file(&file, explicit.is_some()) && !names_flag(&args, "f") {
         args.push("-f".to_string());
         args.push(file.display().to_string());
     }
     args
+}
+
+/// Whether the kernel has to be told which file to read: one named `config.yaml`
+/// is what it looks for under `-d` anyway, anything else is not.
+fn needs_config_file(file: &Path, explicit: bool) -> bool {
+    explicit
+        || !file
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(CONFIG_FILE_NAME))
 }
 
 /// Whether the arguments already carry a Go-style flag: `-d`, `--d`, `-d=…`,
@@ -154,14 +168,20 @@ fn names_flag(args: &[String], flag: &str) -> bool {
 }
 
 /// Scan a mihomo configuration file for `external-controller` and `secret`.
+///
+/// Top level keys only: both are settings of the controller, while a nested
+/// `secret:` (a proxy provider's, say) has nothing to do with reaching it.
 pub fn controller_from_config(path: &Path) -> (Option<String>, Option<String>) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return (None, None);
     };
     let mut address = None;
     let mut secret = None;
-    for line in text.lines() {
-        let line = crate::settings::strip_comment(line).trim();
+    for raw in crate::settings::strip_bom(&text).lines() {
+        if raw.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let line = crate::settings::strip_comment(raw).trim();
         if let Some((key, value)) = line.split_once(':') {
             let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
             match key.trim() {
@@ -283,6 +303,41 @@ mod tests {
         assert_eq!(address.as_deref(), Some("127.0.0.1:9099"));
         assert_eq!(secret.as_deref(), Some("tok"));
         let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_nested_secret_is_not_the_controllers() {
+        let dir = std::env::temp_dir().join("mihomo-tray-test-cfg");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("nested.yaml");
+        std::fs::write(
+            &file,
+            "external-controller: 127.0.0.1:9099\nsecret: \"top\"\nproxy-providers:\n  p:\n    secret: \"nested\"\n",
+        )
+        .unwrap();
+        let (address, secret) = controller_from_config(&file);
+        assert_eq!(address.as_deref(), Some("127.0.0.1:9099"));
+        assert_eq!(secret.as_deref(), Some("top"));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn a_non_default_config_name_is_named_to_the_kernel() {
+        // The kernel looks for `config.yaml` under `-d` on its own, so any other
+        // name — explicit or found through `CLASH_CONFIG_FILE` — has to be given.
+        assert!(needs_config_file(
+            Path::new(r"C:\mihomo\custom.yaml"),
+            false
+        ));
+        assert!(needs_config_file(Path::new(r"C:\mihomo\config.yaml"), true));
+        assert!(!needs_config_file(
+            Path::new(r"C:\mihomo\config.yaml"),
+            false
+        ));
+        assert!(!needs_config_file(
+            Path::new(r"C:\mihomo\CONFIG.YAML"),
+            false
+        ));
     }
 
     #[test]
