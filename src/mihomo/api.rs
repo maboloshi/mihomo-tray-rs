@@ -1,0 +1,541 @@
+//! Minimal mihomo external-controller client built on WinHTTP (a system DLL, so
+//! no HTTP crate and no TLS machinery is linked in; the controller is local).
+
+use serde_json::Value;
+use windows_sys::Win32::Networking::WinHttp::{
+    WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
+    WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+    WinHttpSetTimeouts,
+};
+
+use crate::state::Group;
+
+#[derive(Clone, Debug)]
+pub struct Client {
+    pub host: String,
+    pub port: u16,
+    pub secret: String,
+    pub timeout_ms: u32,
+}
+
+impl Client {
+    /// Accepts `host:port` or `http://host:port`; returns `None` when unusable.
+    pub fn new(address: &str, secret: &str, timeout_ms: u32) -> Option<Self> {
+        let trimmed = address
+            .trim()
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .trim_end_matches('/');
+        let (host, port) = trimmed.rsplit_once(':')?;
+        let host = match host {
+            "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+            other => other.trim_matches(|c| c == '[' || c == ']'),
+        };
+        Some(Self {
+            host: host.to_string(),
+            port: port.parse().ok()?,
+            secret: secret.to_string(),
+            timeout_ms: timeout_ms.max(200),
+        })
+    }
+
+    pub fn address(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    // --- raw HTTP ---------------------------------------------------------
+
+    fn http(&self, method: &str, path: &str, body: Option<&str>) -> Result<(u16, String), String> {
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let method_w = wide(method);
+        let path_w = wide(path);
+        let host_w = wide(&self.host);
+        let agent_w = wide("mihomo-tray");
+        let mut headers = String::from("Content-Type: application/json\r\n");
+        if !self.secret.is_empty() {
+            headers.push_str(&format!("Authorization: Bearer {}\r\n", self.secret));
+        }
+        let headers_w = wide(&headers);
+
+        unsafe {
+            let session = WinHttpOpen(
+                agent_w.as_ptr(),
+                WINHTTP_ACCESS_TYPE_NO_PROXY,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            if session.is_null() {
+                return Err("WinHttpOpen 失败".into());
+            }
+            let t = self.timeout_ms as i32;
+            WinHttpSetTimeouts(session, t, t, t, t);
+            let mut result = Err("请求失败".to_string());
+
+            let connect = WinHttpConnect(session, host_w.as_ptr(), self.port, 0);
+            if !connect.is_null() {
+                let request = WinHttpOpenRequest(
+                    connect,
+                    method_w.as_ptr(),
+                    path_w.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                );
+                if !request.is_null() {
+                    let (ptr, len) = match body {
+                        Some(b) => (b.as_ptr() as *const core::ffi::c_void, b.len() as u32),
+                        None => (std::ptr::null(), 0),
+                    };
+                    if WinHttpSendRequest(request, headers_w.as_ptr(), u32::MAX, ptr, len, len, 0)
+                        != 0
+                        && WinHttpReceiveResponse(request, std::ptr::null_mut()) != 0
+                    {
+                        let mut status: u32 = 0;
+                        let mut size = std::mem::size_of::<u32>() as u32;
+                        WinHttpQueryHeaders(
+                            request,
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            std::ptr::null(),
+                            &mut status as *mut u32 as *mut core::ffi::c_void,
+                            &mut size,
+                            std::ptr::null_mut(),
+                        );
+
+                        // Bound the body: a wrong or wedged listener on the
+                        // controller port must not be able to exhaust memory.
+                        const MAX_BODY: usize = 8 * 1024 * 1024;
+                        let mut buf: Vec<u8> = Vec::new();
+                        let mut overflow = false;
+                        loop {
+                            let mut available: u32 = 0;
+                            if WinHttpQueryDataAvailable(request, &mut available) == 0
+                                || available == 0
+                            {
+                                break;
+                            }
+                            let remaining = MAX_BODY.saturating_sub(buf.len());
+                            if remaining == 0 {
+                                overflow = true;
+                                break;
+                            }
+                            let want = (available as usize).min(remaining) as u32;
+                            let mut chunk = vec![0u8; want as usize];
+                            let mut read: u32 = 0;
+                            if WinHttpReadData(
+                                request,
+                                chunk.as_mut_ptr() as *mut core::ffi::c_void,
+                                want,
+                                &mut read,
+                            ) == 0
+                                || read == 0
+                            {
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk[..read as usize]);
+                        }
+                        result = if overflow {
+                            Err("响应过大（超过 8 MiB）".into())
+                        } else {
+                            Ok((status as u16, String::from_utf8_lossy(&buf).into_owned()))
+                        };
+                    } else {
+                        result = Err("HTTP 请求失败".into());
+                    }
+                    WinHttpCloseHandle(request);
+                }
+                WinHttpCloseHandle(connect);
+            }
+            WinHttpCloseHandle(session);
+            result
+        }
+    }
+
+    fn body_of(&self, method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
+        let (status, text) = self.http(method, path, body)?;
+        if !(200..300).contains(&status) {
+            let detail = text.trim();
+            return Err(if detail.is_empty() {
+                format!("HTTP {status}")
+            } else {
+                format!(
+                    "HTTP {status}: {}",
+                    detail.chars().take(120).collect::<String>()
+                )
+            });
+        }
+        Ok(text)
+    }
+
+    fn json(&self, path: &str) -> Result<Value, String> {
+        let text = self.body_of("GET", path, None)?;
+        serde_json::from_str(&text).map_err(|e| format!("JSON 解析失败: {e}"))
+    }
+
+    // --- endpoints -------------------------------------------------------
+
+    /// `GET /` — the cheapest liveness probe.
+    pub fn alive(&self) -> bool {
+        matches!(self.http("GET", "/", None), Ok((200, text)) if text.contains("mihomo"))
+    }
+
+    pub fn version(&self) -> Result<String, String> {
+        let v = self.json("/version")?;
+        Ok(v["version"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// `(mode, mixed_port, tun_enabled)`; TUN is the effective value.
+    pub fn configs(&self) -> Result<(String, u16, bool), String> {
+        let v = self.json("/configs")?;
+        let mode = v["mode"].as_str().unwrap_or_default().to_string();
+        let mixed_port = v["mixed-port"]
+            .as_u64()
+            .filter(|port| *port <= u16::MAX as u64)
+            .unwrap_or(0) as u16;
+        let tun = v["tun"]["enable"].as_bool().unwrap_or(false);
+        Ok((mode, mixed_port, tun))
+    }
+
+    pub fn proxies(&self) -> Result<Vec<Group>, String> {
+        let v = self.json("/proxies")?;
+        let Some(map) = v["proxies"].as_object() else {
+            return Ok(Vec::new());
+        };
+        let mut groups = Vec::new();
+        for (name, entry) in map {
+            if entry["hidden"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let Some(members) = entry["all"].as_array() else {
+                continue; // a plain node, not a group
+            };
+            let kind = entry["type"].as_str().unwrap_or_default().to_string();
+            groups.push(Group {
+                name: name.clone(),
+                switchable: kind == "Selector",
+                kind,
+                now: entry["now"].as_str().unwrap_or_default().to_string(),
+                members: members
+                    .iter()
+                    .filter_map(|m| m.as_str().map(str::to_string))
+                    .collect(),
+            });
+        }
+        Ok(groups)
+    }
+
+    pub fn set_mode(&self, mode: &str) -> Result<(), String> {
+        let body = format!("{{\"mode\":\"{mode}\"}}");
+        self.body_of("PATCH", "/configs", Some(&body)).map(|_| ())
+    }
+
+    pub fn set_tun(&self, enable: bool) -> Result<(), String> {
+        let body = format!("{{\"tun\":{{\"enable\":{enable}}}}}");
+        self.body_of("PATCH", "/configs", Some(&body)).map(|_| ())
+    }
+
+    pub fn select(&self, group: &str, member: &str) -> Result<(), String> {
+        let path = format!("/proxies/{}", percent_encode(group));
+        let body = format!("{{\"name\":\"{}\"}}", escape_json(member));
+        self.body_of("PUT", &path, Some(&body)).map(|_| ())
+    }
+
+    /// Let mihomo reload its own configuration file: an empty `path` makes the
+    /// core fall back to the file it was started with, so we never need to know
+    /// where that file is. `force=true` re-creates the inbound listeners.
+    pub fn reload(&self) -> Result<(), String> {
+        self.body_of("PUT", "/configs?force=true", Some("{\"path\":\"\"}"))
+            .map(|_| ())
+    }
+}
+
+/// Percent-encode everything outside the RFC 3986 unreserved set (group names
+/// are frequently non-ASCII).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        let c = *byte as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Escape a member name for embedding into a JSON string literal.
+fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn parses_addresses() {
+        let c = Client::new("127.0.0.1:9090", "", 2000).unwrap();
+        assert_eq!((c.host.as_str(), c.port), ("127.0.0.1", 9090));
+        let c = Client::new("http://localhost:9098/", "s", 500).unwrap();
+        assert_eq!(
+            (c.host.as_str(), c.port, c.secret.as_str()),
+            ("localhost", 9098, "s")
+        );
+        let c = Client::new("0.0.0.0:9090", "", 2000).unwrap();
+        assert_eq!(c.host, "127.0.0.1");
+        assert!(Client::new("no-port", "", 2000).is_none());
+    }
+
+    #[test]
+    fn encodes_non_ascii_paths() {
+        assert_eq!(
+            percent_encode("自动选择"),
+            "%E8%87%AA%E5%8A%A8%E9%80%89%E6%8B%A9"
+        );
+        assert_eq!(percent_encode("A B&C"), "A%20B%26C");
+        assert_eq!(percent_encode("plain-1_2.3~"), "plain-1_2.3~");
+    }
+
+    #[test]
+    fn escapes_json_members() {
+        assert_eq!(escape_json("a\"b\\c"), "a\\\"b\\\\c");
+    }
+
+    // --- fake HTTP server -------------------------------------------------
+
+    /// One request exactly as the fake server received it.
+    struct SentRequest {
+        method: String,
+        path: String,
+        /// Raw header block, request line included.
+        headers: String,
+        body: String,
+    }
+
+    /// A single-shot HTTP/1.1 server bound to an ephemeral loopback port.
+    struct FakeServer {
+        port: u16,
+        rx: mpsc::Receiver<SentRequest>,
+    }
+
+    impl FakeServer {
+        /// `host:port` for `Client::new`.
+        fn address(&self) -> String {
+            format!("127.0.0.1:{}", self.port)
+        }
+
+        /// The request the client sent; panics when none ever arrives.
+        fn request(&self) -> SentRequest {
+            self.rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("fake server received no request")
+        }
+    }
+
+    /// Serves exactly one request, then answers with `status`/`reason`/`payload`
+    /// and closes the connection (`Connection: close`).
+    fn spawn_server(status: u16, reason: &str, payload: &str) -> FakeServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+        let port = listener.local_addr().expect("fake server address").port();
+        let reason = reason.to_string();
+        let payload = payload.to_string();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+
+            // Read up to and including the blank line that ends the headers.
+            let mut raw: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let head_end = loop {
+                let read = stream.read(&mut chunk).unwrap_or(0);
+                if read == 0 {
+                    break 0;
+                }
+                raw.extend_from_slice(&chunk[..read]);
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+
+            let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
+            let mut lines = head.split("\r\n");
+            let mut request_line = lines.next().unwrap_or_default().split(' ');
+            let method = request_line.next().unwrap_or_default().to_string();
+            let path = request_line.next().unwrap_or_default().to_string();
+            let content_length = lines
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+
+            // Drain the body announced by Content-Length, if any.
+            while raw.len() - head_end < content_length {
+                let read = stream.read(&mut chunk).unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&chunk[..read]);
+            }
+            let body = String::from_utf8_lossy(&raw[head_end..]).into_owned();
+
+            let _ = tx.send(SentRequest {
+                method,
+                path,
+                headers: head,
+                body,
+            });
+
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            // Dropping `stream` closes the connection.
+        });
+        FakeServer { port, rx }
+    }
+
+    // --- live WinHTTP round trips -----------------------------------------
+
+    #[test]
+    fn configs_parses_mode_port_and_tun() {
+        let server = spawn_server(
+            200,
+            "OK",
+            r#"{"mode":"rule","mixed-port":7890,"tun":{"enable":true}}"#,
+        );
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        assert_eq!(client.configs().unwrap(), ("rule".to_string(), 7890, true));
+        let sent = server.request();
+        assert_eq!(
+            (sent.method.as_str(), sent.path.as_str()),
+            ("GET", "/configs")
+        );
+    }
+
+    #[test]
+    fn proxies_returns_only_groups_and_respects_hidden() {
+        let server = spawn_server(
+            200,
+            "OK",
+            r#"{"proxies":{
+                "DIRECT":{"type":"Direct"},
+                "Hidden Group":{"type":"Selector","all":["DIRECT"],"now":"DIRECT","hidden":true},
+                "Auto":{"type":"Selector","all":["A","B"],"now":"B"},
+                "Fallback":{"type":"URLTest","all":["A","B"],"now":"A"}
+            }}"#,
+        );
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        let groups = client.proxies().unwrap();
+
+        // The plain node and the hidden group are dropped.
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|g| g.name != "DIRECT"));
+        assert!(groups.iter().all(|g| g.name != "Hidden Group"));
+
+        let auto = groups
+            .iter()
+            .find(|g| g.name == "Auto")
+            .expect("Auto group");
+        assert_eq!(auto.kind, "Selector");
+        assert!(auto.switchable);
+        assert_eq!(auto.now, "B");
+        assert_eq!(auto.members, vec!["A".to_string(), "B".to_string()]);
+
+        let fallback = groups
+            .iter()
+            .find(|g| g.name == "Fallback")
+            .expect("Fallback group");
+        assert_eq!(fallback.kind, "URLTest");
+        assert!(!fallback.switchable);
+        assert_eq!(fallback.now, "A");
+        assert_eq!(fallback.members, vec!["A".to_string(), "B".to_string()]);
+
+        let sent = server.request();
+        assert_eq!(
+            (sent.method.as_str(), sent.path.as_str()),
+            ("GET", "/proxies")
+        );
+    }
+
+    #[test]
+    fn reload_forces_the_own_config_path() {
+        let server = spawn_server(204, "No Content", "");
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        client.reload().unwrap();
+
+        let sent = server.request();
+        assert_eq!(sent.method, "PUT");
+        assert_eq!(sent.path, "/configs?force=true");
+        assert_eq!(sent.body, r#"{"path":""}"#);
+    }
+
+    #[test]
+    fn select_percent_encodes_the_group_and_escapes_the_member() {
+        let server = spawn_server(204, "No Content", "");
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        let member = "A \"B\" & C";
+        client.select("自动选择", member).unwrap();
+
+        let sent = server.request();
+        assert_eq!(sent.method, "PUT");
+        assert_eq!(sent.path, "/proxies/%E8%87%AA%E5%8A%A8%E9%80%89%E6%8B%A9");
+        let body: serde_json::Value = serde_json::from_str(&sent.body).expect("valid JSON body");
+        assert_eq!(body["name"].as_str(), Some(member));
+    }
+
+    #[test]
+    fn authorization_header_is_sent_only_with_a_secret() {
+        let secured = spawn_server(204, "No Content", "");
+        let client = Client::new(&secured.address(), "tok", 2000).unwrap();
+        client.set_mode("rule").unwrap();
+        assert!(
+            secured
+                .request()
+                .headers
+                .contains("Authorization: Bearer tok")
+        );
+
+        let open = spawn_server(204, "No Content", "");
+        let client = Client::new(&open.address(), "", 2000).unwrap();
+        client.set_mode("rule").unwrap();
+        assert!(!open.request().headers.contains("Authorization"));
+    }
+
+    #[test]
+    fn http_error_is_reported_with_status_and_body() {
+        let server = spawn_server(400, "Bad Request", "Must be a Selector");
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        let err = client.set_mode("rule").unwrap_err();
+        assert!(err.contains("400"), "unexpected error: {err}");
+        assert!(
+            err.contains("Must be a Selector"),
+            "unexpected error: {err}"
+        );
+    }
+}
