@@ -14,6 +14,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 - **代理分组** — `GLOBAL` 与其余可切换组，逐层子菜单；成员打钩表示当前节点。`Selector`、`URLTest`、`Fallback` 的成员都可点（后两者的点击等于手动固定节点，菜单会多出「自动（取消固定）」）；`LoadBalance` 等真正只读的组灰显但展示当前值
 - **开机自启动** — HKCU `Run` 键，不触发 UAC
 - **重载配置** — `PUT /configs?force=true`，让内核重载它自己那份配置（本程序无需知道 yml 路径）
+- **打开 Web 面板** — 用默认浏览器打开面板地址：默认是内核自己的 `external-ui`（`http://<控制器地址>/ui/`），也可在 `tray.yml` 里换成外部托管的面板（如 zashboard / metacubexd），`{host}`/`{port}`/`{secret}` 会替换成当前内核的值
 - **退出** — 「退出并停止 Mihomo」（只结束本程序掌控的实例；内核被 TUN 提权过时会再要一次 UAC）/「仅退出程序」
 - 单实例互斥；资源管理器重启后自动重新注册托盘图标；菜单主题跟随系统，运行中切换明暗即时生效
 
@@ -63,6 +64,9 @@ groups:
   exclude: []
   page_size: 0        # 0 = 交给系统滚动箭头；>0 时长列表拆成翻页子菜单
 ui:
+  web_url: ""         # 面板地址；留空 = http://<控制器地址>/ui/（内核自己的 external-ui）
+                      # {host}/{port}/{secret} 会替换成当前控制器，例如：
+                      # https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}
   poll_interval_ms: 3000
   dark_menu: auto     # auto | always | never
 ```
@@ -107,12 +111,13 @@ ui:
 - 长列表由系统滚动箭头 + 鼠标滚轮 + 方向键处理（构建菜单时设置了 `MIM_MAXHEIGHT`，这也是官方建议的做法——默认以屏幕高度为上限在多显示器下会失效）。
 - 只读组（`LoadBalance` 与普通节点）的成员不可点击，仅展示当前值。
 - `URLTest`/`Fallback` 组被点选后会进入「已固定」状态（组名带 `· 已固定`），此时内核不再自动测速换节点；用组内的「自动（取消固定）」（`DELETE /proxies/{name}`）恢复自动选择。固定状态由内核写进它自己的缓存，重载配置也会清除。
+- **面板是本程序之外的东西**：「打开 Web 面板」只是把地址交给默认浏览器。要内核自己伺服一份静态面板，得在 mihomo 里配 `external-ui`（那份文件挂在控制器的 `/ui/` 下，正是默认地址）；用外部托管的面板（zashboard、metacubexd 等）则**不需要改 mihomo**，只要 `external-controller` 可达、在面板里填地址与 secret 即可——但那个页面与内核不同源时，mihomo 的 `external-controller-cors.allow-origins` 必须放行该来源，否则浏览器会拦在 CORS 上。控制器不可达时这一项与其他操作项一样灰显。
 - Windows 11 默认把新的托盘图标收进溢出区，首次运行需要手动把它拖到任务栏固定。
 - 本程序（托盘）始终以普通权限运行；只有 TUN 需要管理员权限：点「TUN 模式」而内核没能建起 Wintun 时，弹一次 UAC 让内核变成提权实例，托盘自身不提权。
 
 ## 与 Go 版 `mihomo-tray` 的差异
 
-不做：设置窗口、自绘弹窗、节点延迟色点、流量曲线、订阅刷新、脚本执行。
+不做：设置窗口、自绘弹窗、节点延迟色点、流量曲线、订阅刷新、脚本执行；需要图形化的设置就用内核自己的面板（菜单里的「打开 Web 面板」）。
 另外：停止内核只结束本程序启动或路径匹配的实例（Go 版用 `taskkill /IM mihomo.exe` 会误杀其他实例）；重载与状态读取均走控制器 API。
 
 设计文档见 [docs/DESIGN.md](docs/DESIGN.md)。

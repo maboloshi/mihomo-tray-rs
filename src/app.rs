@@ -136,6 +136,15 @@ impl App {
             }),
             Action::Unfix(group) => self.send(Command::Unfix(group.clone())),
             Action::Reload => self.send(Command::Reload),
+            Action::OpenWebUi => {
+                // The entry is only clickable while the controller answers, and
+                // the refresh that proves that is the one that published this
+                // URL, so the two cannot disagree.
+                let url = state::read(&self.state).web_ui_url;
+                if let Err(error) = win::shell::open_url(&url) {
+                    self.set_error(error);
+                }
+            }
             Action::ToggleSysProxy => {
                 let snapshot = state::read(&self.state);
                 let port = if snapshot.mixed_port > 0 {
@@ -367,7 +376,13 @@ fn spawn_worker(
             loop {
                 // Refresh first so the very first menu the user opens already has
                 // real data, then wait either for a command or the poll interval.
-                refresh(worker.client, &state, &mut version, outcome.take());
+                refresh(
+                    worker.client,
+                    &settings.web_url,
+                    &state,
+                    &mut version,
+                    outcome.take(),
+                );
                 post(hwnd, win::WM_REFRESH);
                 if waiting_for_kernel {
                     // Over as soon as there is an answer — or as soon as the kernel
@@ -604,7 +619,16 @@ fn show_note(state: &Shared, hwnd: isize, message: Option<String>) {
 /// Error ownership is split on purpose: the controller error is set and cleared
 /// here (it must disappear once the controller answers again), while an action
 /// error carries over until the next action replaces or clears it.
-fn refresh(client: &Client, shared: &Shared, version: &mut String, outcome: Outcome) {
+///
+/// `web_url` is the panel template from `tray.yml`; the snapshot carries what it
+/// resolves to against the controller, so the UI thread never needs the address.
+fn refresh(
+    client: &Client,
+    web_url: &str,
+    shared: &Shared,
+    version: &mut String,
+    outcome: Outcome,
+) {
     let previous = state::read(shared);
     let mut snapshot = Snapshot {
         kernel_running: !proc::list_mihomo().is_empty(),
@@ -613,6 +637,7 @@ fn refresh(client: &Client, shared: &Shared, version: &mut String, outcome: Outc
         action_error: previous.action_error,
         status_note: previous.status_note,
         kernel_pid: previous.kernel_pid,
+        web_ui_url: client.web_ui_url(web_url),
         ..Default::default()
     };
 

@@ -70,6 +70,7 @@ messages! {
     menu_empty => "menu.empty",
     menu_autostart => "menu.autostart",
     menu_reload => "menu.reload",
+    menu_web_ui => "menu.web_ui",
     menu_exit => "menu.exit",
     menu_exit_stop_kernel => "menu.exit_stop_kernel",
     menu_exit_only => "menu.exit_only",
@@ -116,6 +117,7 @@ messages! {
     error_kernel_needs_admin => "error.kernel_needs_admin",
     error_kernel_args => "error.kernel_args",
     error_message_window => "error.message_window",
+    error_open_web_ui_tpl => "error.open_web_ui",
     error_open_internet_settings_tpl => "error.open_internet_settings",
     error_set_proxy_enable_tpl => "error.set_proxy_enable",
     error_set_proxy_server_tpl => "error.set_proxy_server",
@@ -224,6 +226,10 @@ impl Messages {
         self.fill(&self.error_delete_autostart_tpl, &[("error", error)])
     }
 
+    pub fn error_open_web_ui(&self, code: &str) -> String {
+        self.fill(&self.error_open_web_ui_tpl, &[("code", code)])
+    }
+
     pub fn error_open_internet_settings(&self, error: &str) -> String {
         self.fill(&self.error_open_internet_settings_tpl, &[("error", error)])
     }
@@ -260,6 +266,7 @@ impl Messages {
             menu_empty: Cow::Borrowed("(空)"),
             menu_autostart: Cow::Borrowed("开机自启动"),
             menu_reload: Cow::Borrowed("重载配置"),
+            menu_web_ui: Cow::Borrowed("打开 Web 面板"),
             menu_exit: Cow::Borrowed("退出"),
             menu_exit_stop_kernel: Cow::Borrowed("退出并停止 Mihomo"),
             menu_exit_only: Cow::Borrowed("仅退出程序"),
@@ -306,6 +313,9 @@ impl Messages {
             error_kernel_needs_admin: Cow::Borrowed("内核以管理员权限运行，本程序无权停止它"),
             error_kernel_args: Cow::Borrowed("无法读取内核自己的启动参数，未重启内核"),
             error_message_window: Cow::Borrowed("创建消息窗口失败"),
+            error_open_web_ui_tpl: Cow::Borrowed(
+                "打开 Web 面板失败: 无法用默认浏览器打开（ShellExecute 返回 {code}）",
+            ),
             error_open_internet_settings_tpl: Cow::Borrowed("打开 Internet Settings 失败: {error}"),
             error_set_proxy_enable_tpl: Cow::Borrowed("设置 ProxyEnable 失败: {error}"),
             error_set_proxy_server_tpl: Cow::Borrowed("设置 ProxyServer 失败: {error}"),
@@ -332,6 +342,7 @@ impl Messages {
             menu_empty: Cow::Borrowed("(empty)"),
             menu_autostart: Cow::Borrowed("Start with Windows"),
             menu_reload: Cow::Borrowed("Reload config"),
+            menu_web_ui: Cow::Borrowed("Open web dashboard"),
             menu_exit: Cow::Borrowed("Exit"),
             menu_exit_stop_kernel: Cow::Borrowed("Exit and stop Mihomo"),
             menu_exit_only: Cow::Borrowed("Exit only"),
@@ -398,6 +409,9 @@ impl Messages {
                 "Could not read the kernel's own command line, so it was not restarted",
             ),
             error_message_window: Cow::Borrowed("Failed to create the message window"),
+            error_open_web_ui_tpl: Cow::Borrowed(
+                "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})",
+            ),
             error_open_internet_settings_tpl: Cow::Borrowed(
                 "Failed to open Internet Settings: {error}",
             ),

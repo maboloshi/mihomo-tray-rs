@@ -21,13 +21,14 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 | `代理分组 ▶` | `GLOBAL` + 其余可切换组，每组一个子菜单；成员单选切换；只读组（`LoadBalance`/`Relay`）灰显当前值 |
 | `开机自启动` | HKCU Run 键增删 |
 | `重载配置` | `PUT /configs?force=true`，body `{"path":""}`（让 mihomo 重载它自己的配置文件） |
+| `打开 Web 面板` | 用默认浏览器打开面板地址（`ShellExecuteW`）：默认 `http://<控制器地址>/ui/`（内核 `external-ui` 的挂载点），可由 `ui.web_url` 换成外部托管面板，`{host}`/`{port}`/`{secret}` 替换成当前控制器的值；控制器不可达时与其他操作项一样灰显 |
 | `退出 ▶` | `退出并停止 Mihomo`（只结束本程序掌控或路径匹配的进程；提权内核由提权副本停止，再确认一次 UAC）/ `仅退出程序` |
 
 附加（非菜单）：单实例互斥；资源管理器重启后自动重新注册托盘图标。
 
 ### 1.2 明确不做
 
-设置窗口、自绘弹窗、owner-draw 视觉、节点延迟色点、流量/内存曲线、订阅 provider 刷新、脚本执行、CFW 式的 HTML 界面。
+设置窗口、自绘弹窗、owner-draw 视觉、节点延迟色点、流量/内存曲线、订阅 provider 刷新、脚本执行、CFW 式的 HTML 界面。图形化设置不由本程序提供：交给内核自己的面板（`打开 Web 面板`），本程序只负责把地址交给默认浏览器。
 
 ---
 
@@ -221,6 +222,7 @@ groups:
   exclude: []
   page_size: 0            # 0 = 不翻页（长列表交给系统滚动箭头/滚轮）；>0 时超出则拆翻页子菜单
 ui:
+  web_url: ""             # 面板地址；留空 = http://<控制器地址>/ui/；{host}/{port}/{secret} 由当前控制器填入
   poll_interval_ms: 3000
   dark_menu: auto         # auto | always | never
 ```

@@ -47,6 +47,10 @@ pub struct Snapshot {
     /// An elevated process's image path cannot be read from here, so a PID is the
     /// only identity the tray can hold on to.
     pub kernel_pid: Option<u32>,
+    /// The dashboard "open the web UI" opens, resolved against the controller this
+    /// worker found. Resolved on the worker thread because that is where the
+    /// controller's address lives; the UI thread only opens what it is handed.
+    pub web_ui_url: String,
 }
 
 impl Snapshot {

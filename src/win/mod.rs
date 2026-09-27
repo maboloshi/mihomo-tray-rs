@@ -9,6 +9,7 @@ pub mod autostart;
 pub mod elevate;
 pub mod menu;
 pub mod proxy;
+pub mod shell;
 
 use std::sync::OnceLock;
 

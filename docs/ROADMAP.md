@@ -6,7 +6,7 @@
 
 Phase 1（MVP）已实现并真机验证：
 
-- 8 项菜单功能（状态行 / 系统代理 / 代理模式 / TUN / 代理分组 / 开机自启动 / 重载配置 / 退出两项）全部可用
+- 9 项菜单功能（状态行 / 系统代理 / 代理模式 / TUN / 代理分组 / 开机自启动 / 重载配置 / 打开 Web 面板 / 退出两项）全部可用
 - 三层发现链（内核 exe、配置文件、控制器地址）在「配置文件里没有 `external-controller`、地址由环境变量注入」的机器上仍能正确定位
 - `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿
 - 实测：exe ~353 KiB（361,984 B）；空闲私有内存 2.6–3.4 MB，工作集 ~15 MB
@@ -26,6 +26,8 @@ Phase 1（MVP）已实现并真机验证：
 | 8 | Windows 11 托盘溢出区 | 首次运行需手动把图标拖到任务栏固定（系统行为） |
 | 9 | 不重启程序，切换 Windows「应用」浅色/深色 | 菜单主题跟着变（浅↔深都生效） |
 | 10 | 打开自动组（`URLTest`）子菜单并点一个节点 | 切换成功且组名出现 `· 已固定`；再点「自动（取消固定）」恢复自动 |
+| 11 | 「打开 Web 面板」（留空 `ui.web_url`，内核配了 `external-ui`） | 默认浏览器打开 `http://<控制器地址>/ui/`；内核没配 `external-ui` 时页面 404（这是内核侧的事，不是本程序失败） |
+| 12 | `ui.web_url` 指向托管面板（如 `https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}`） | 打开的页面已连上当前内核；若浏览器报 CORS，需在内核的 `external-controller-cors.allow-origins` 里放行该来源 |
 
 > 说明：自动化向隐藏窗口 `PostMessage` 弹出菜单时，窗口拿不到前台激活权，模拟鼠标/键盘无法驱动系统菜单内部循环，因此第 1、2 项必须人工确认。
 
@@ -39,7 +41,7 @@ Phase 1（MVP）已实现并真机验证：
 | 订阅 provider 刷新（`PUT /providers/proxies/{name}`） | 中 | 小 | 需先读 `/providers/proxies` 展示 `updatedAt` |
 | ~~schtasks 免 UAC 自启（含 TUN 开机即用）~~ | — | — | 已否决：计划任务服务可能被禁用。改为点 TUN 时按需提权（一次性辅助进程重启内核） |
 | 节点延迟/健康色点（owner-draw 菜单项） | 中 | 大 | 观感提升明显，但要 `WM_MEASUREITEM`/`WM_DRAWITEM` 全套 |
-| 设置界面 | 高 | 大 | 用 Tauri 会毁掉体积/内存优势；建议原生对话框或继续编辑 `tray.yml` |
+| 设置界面 | 高 | 大 | 用 Tauri 会毁掉体积/内存优势；建议原生对话框或继续编辑 `tray.yml`。**内核侧的图形化设置已由「打开 Web 面板」覆盖**，这里说的只剩本程序自己的 `tray.yml` |
 | 手写 JSON 取值替代 `serde_json` | 低 | 中 | 实测只能省 ~33 KB，不推荐 |
 
 ## 硬约束（新会话/子代理必须遵守）

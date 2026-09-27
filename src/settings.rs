@@ -28,6 +28,10 @@ pub struct Settings {
     pub groups_include: Vec<String>,
     pub groups_exclude: Vec<String>,
     pub groups_page_size: usize,
+    /// The dashboard "open the web UI" points at. Empty means "the kernel's own
+    /// `external-ui`, under the controller address" — a kernel without
+    /// `external-ui` configured serves nothing there, hence the override.
+    pub web_url: String,
     pub poll_interval_ms: u32,
     pub dark_menu: DarkMenu,
 }
@@ -47,6 +51,7 @@ impl Default for Settings {
             groups_include: Vec::new(),
             groups_exclude: Vec::new(),
             groups_page_size: 0,
+            web_url: String::new(),
             poll_interval_ms: 3000,
             dark_menu: DarkMenu::Auto,
         }
@@ -79,6 +84,9 @@ groups:
   page_size: 0         # 0 = let the system scroll long menus; >0 = page long groups
 
 ui:
+  web_url: \"\"         # dashboard to open; empty = http://<controller address>/ui/
+                       # {host}, {port} and {secret} are filled in from the controller,
+                       # e.g. \"https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}\"
   poll_interval_ms: 3000
   dark_menu: auto      # auto | always | never
 ";
@@ -169,6 +177,7 @@ fn parse(text: &str) -> Settings {
             ("groups", "include") => s.groups_include = parse_list(value),
             ("groups", "exclude") => s.groups_exclude = parse_list(value),
             ("groups", "page_size") => s.groups_page_size = value.parse().unwrap_or(0),
+            ("ui", "web_url") => s.web_url = unquote(value),
             ("ui", "poll_interval_ms") => {
                 s.poll_interval_ms = value.parse().unwrap_or(3000).clamp(500, 60_000)
             }
@@ -263,6 +272,7 @@ mod tests {
         assert_eq!(s.poll_interval_ms, 3000);
         assert_eq!(s.groups_page_size, 0);
         assert_eq!(s.dark_menu, DarkMenu::Auto);
+        assert!(s.web_url.is_empty());
     }
 
     #[test]
@@ -280,6 +290,7 @@ groups:
   page_size: 50
 ui:
   dark_menu: always
+  web_url: \"https://board.zash.run.place/#/setup?hostname={host}&port={port}\"
 ";
         let s = parse(text);
         assert_eq!(s.controller_address, "127.0.0.1:9098");
@@ -292,6 +303,11 @@ ui:
         assert_eq!(s.proxy_bypass, vec!["*.local", "example.com"]);
         assert_eq!(s.groups_page_size, 50);
         assert_eq!(s.dark_menu, DarkMenu::Always);
+        // A `#` inside quotes is part of the URL, not a comment.
+        assert_eq!(
+            s.web_url,
+            "https://board.zash.run.place/#/setup?hostname={host}&port={port}"
+        );
     }
 
     #[test]

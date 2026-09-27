@@ -17,6 +17,10 @@ use crate::state::Group;
 /// takes seconds to come back must not turn every candidate into a stall.
 const PROBE_TIMEOUT_MS: u32 = 800;
 
+/// The dashboard used when `tray.yml` configures none: the kernel's own
+/// `external-ui`, which mihomo serves under this path of the controller.
+const DEFAULT_WEB_UI: &str = "http://{host}:{port}/ui/";
+
 #[derive(Clone, Debug)]
 pub struct Client {
     pub host: String,
@@ -48,6 +52,26 @@ impl Client {
 
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// The dashboard the tray's "open web UI" entry opens.
+    ///
+    /// An empty `template` means the kernel's own UI: mihomo mounts the
+    /// directory from its `external-ui` setting under `/ui/` of the external
+    /// controller, and that is plain http even when the address was written
+    /// with a scheme. A template is used as it is, except that `{host}`,
+    /// `{port}` and `{secret}` are replaced with this controller's — which is
+    /// how a panel hosted elsewhere (zashboard, metacubexd) opens already
+    /// pointed at this kernel instead of asking for the address by hand.
+    pub fn web_ui_url(&self, template: &str) -> String {
+        let template = match template.trim() {
+            "" => DEFAULT_WEB_UI,
+            template => template,
+        };
+        template
+            .replace("{host}", &self.host)
+            .replace("{port}", &self.port.to_string())
+            .replace("{secret}", &self.secret)
     }
 
     // --- raw HTTP ---------------------------------------------------------
@@ -335,6 +359,26 @@ mod tests {
         let c = Client::new("0.0.0.0:9090", "", 2000).unwrap();
         assert_eq!(c.host, "127.0.0.1");
         assert!(Client::new("no-port", "", 2000).is_none());
+    }
+
+    #[test]
+    fn the_web_ui_url_follows_the_configured_template() {
+        let c = Client::new("0.0.0.0:9090", "s3cret", 2000).unwrap();
+        // No template: the kernel's own dashboard, next to the controller.
+        assert_eq!(c.web_ui_url(""), "http://127.0.0.1:9090/ui/");
+        assert_eq!(c.web_ui_url("  "), "http://127.0.0.1:9090/ui/");
+        // A hosted panel is pointed at this kernel through the placeholders.
+        assert_eq!(
+            c.web_ui_url(
+                "https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}"
+            ),
+            "https://board.zash.run.place/#/setup?hostname=127.0.0.1&port=9090&secret=s3cret"
+        );
+        // A template without placeholders is opened as it is.
+        assert_eq!(
+            c.web_ui_url("http://localhost:8080/"),
+            "http://localhost:8080/"
+        );
     }
 
     #[test]

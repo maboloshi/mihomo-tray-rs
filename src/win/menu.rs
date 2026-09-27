@@ -27,6 +27,10 @@ pub enum Action {
     Unfix(String),
     ToggleAutostart,
     Reload,
+    /// Open the kernel's dashboard (or a hosted one pointed at it) in the
+    /// browser. The tray itself has no settings window, so this is where the
+    /// rest of mihomo is configured.
+    OpenWebUi,
     ExitStopKernel,
     ExitOnly,
 }
@@ -121,6 +125,9 @@ impl Menu {
             true,
         );
         builder.item(root, &messages.menu_reload, Action::Reload, false, ready);
+        // The URL points at the controller (or at a panel told about it), so
+        // this entry follows the controller like every other action here.
+        builder.item(root, &messages.menu_web_ui, Action::OpenWebUi, false, ready);
 
         builder.separator(root);
         let exit_menu = builder.new_menu();
@@ -629,6 +636,39 @@ mod tests {
             action,
             Action::Select { group, member } if group == "G&1" && member == "a\nb"
         )));
+    }
+
+    #[test]
+    fn the_web_dashboard_entry_follows_the_controller_like_the_rest() {
+        let messages = i18n::t();
+        let ready = Menu::build(&snapshot(Vec::new()), &Settings::default());
+        let index = ready
+            .actions
+            .iter()
+            .position(|action| matches!(action, Action::OpenWebUi))
+            .expect("the web dashboard entry exists");
+        let id = ID_BASE + index;
+        assert_eq!(
+            label(ready.handle, id),
+            messages.menu_web_ui.to_string(),
+            "the entry sits in the root menu"
+        );
+        assert_eq!(
+            unsafe { GetMenuState(ready.handle, id as u32, MF_BYCOMMAND) } & MF_GRAYED,
+            0,
+            "a reachable controller leaves the entry clickable"
+        );
+
+        // The URL points at the controller, so an unreachable one means there is
+        // no dashboard to open.
+        let mut offline = snapshot(Vec::new());
+        offline.controller_ok = false;
+        let offline = Menu::build(&offline, &Settings::default());
+        assert_ne!(
+            unsafe { GetMenuState(offline.handle, id as u32, MF_BYCOMMAND) } & MF_GRAYED,
+            0,
+            "without a controller the entry is grayed out"
+        );
     }
 
     #[test]
