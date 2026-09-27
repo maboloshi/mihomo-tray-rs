@@ -25,12 +25,6 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").map(PathBuf::from)
 }
 
-fn is_shim(path: &Path) -> bool {
-    path.to_string_lossy()
-        .to_ascii_lowercase()
-        .contains(r"scoop\shims")
-}
-
 /// Candidate `mihomo.exe` locations, highest priority first.
 pub fn kernel_candidates(settings: &Settings) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -39,7 +33,7 @@ pub fn kernel_candidates(settings: &Settings) -> Vec<PathBuf> {
     }
     if let Some(running) = proc::list_mihomo()
         .into_iter()
-        .find(|p| !p.path.as_os_str().is_empty() && !is_shim(&p.path))
+        .find(|p| !p.path.as_os_str().is_empty() && !proc::is_shim(&p.path))
         .map(|p| p.path)
     {
         out.push(running);
@@ -85,7 +79,7 @@ pub fn find_kernel(settings: &Settings) -> Option<PathBuf> {
     // kernel it started, so a real binary is always preferred when one exists.
     candidates
         .iter()
-        .find(|path| !is_shim(path))
+        .find(|path| !proc::is_shim(path))
         .cloned()
         .or_else(|| candidates.into_iter().next())
 }

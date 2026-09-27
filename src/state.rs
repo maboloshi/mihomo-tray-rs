@@ -46,6 +46,10 @@ pub struct Snapshot {
     /// Stopping uses it first, because that is the only path that is certainly
     /// the kernel's own — the discovered path is a fallback.
     pub kernel_target: Option<PathBuf>,
+    /// The kernel the elevated helper started, as reported through its exit code.
+    /// An elevated process's image path cannot be read from here, so a PID is the
+    /// only identity the tray can hold on to.
+    pub kernel_pid: Option<u32>,
 }
 
 impl Snapshot {
@@ -128,4 +132,14 @@ pub fn write_kernel_target(state: &Shared, path: Option<PathBuf>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .kernel_target = path;
+}
+
+/// Remember the kernel the elevated helper started, by PID: after a replacement
+/// the tray cannot read that process's image path, and the PID is what the helper
+/// reported back.
+pub fn write_kernel_pid(state: &Shared, pid: Option<u32>) {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .kernel_pid = pid;
 }

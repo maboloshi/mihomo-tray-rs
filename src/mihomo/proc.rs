@@ -41,26 +41,60 @@ const TERMINATE_WAIT_MS: u32 = 5_000;
 pub const KERNEL_START_SWITCH: &str = "--kernel-start-elevated";
 pub const KERNEL_STOP_SWITCH: &str = "--kernel-stop-elevated";
 
-/// Helper exit codes. The tray only needs "0 or not", but naming them keeps the
-/// helper readable.
+/// Helper exit codes: the start helper answers with the PID of the kernel it
+/// started, which is positive by construction, so every failure is negative.
+///
+/// The answer travels in the exit code because that is the one channel a process
+/// launched through the UAC prompt has. A report file would have to be named by
+/// the caller — which would hand any unprivileged process a way to make this
+/// helper write a file with administrator rights.
 pub const HELPER_OK: i32 = 0;
-pub const HELPER_BAD_ARGS: i32 = 2;
-pub const HELPER_NOT_STOPPED: i32 = 3;
-pub const HELPER_NOT_STARTED: i32 = 4;
+pub const HELPER_BAD_ARGS: i32 = -2;
+pub const HELPER_NOT_STOPPED: i32 = -3;
+pub const HELPER_NOT_STARTED: i32 = -4;
 /// A `mihomo.exe` is running that even the helper may not stop.
-pub const HELPER_DENIED: i32 = 5;
+pub const HELPER_DENIED: i32 = -5;
 /// The kernel's own command line could not be read, so it cannot be restarted
 /// the way it was running.
-pub const HELPER_UNREADABLE: i32 = 6;
+pub const HELPER_UNREADABLE: i32 = -6;
 
 #[derive(Debug, Clone)]
 pub struct Process {
     pub pid: u32,
+    /// The process that started it. A scoop shim is called `mihomo.exe` as well,
+    /// and the kernel it starts is its child, so this is what tells a launcher
+    /// apart from the kernel it launched.
+    pub parent: u32,
     pub path: PathBuf,
     /// The image path could not be read, so the process could not be told apart
     /// from the kernel this program is responsible for: a kernel with higher
     /// rights, or one whose path query was refused. Never touched from here.
     pub denied: bool,
+}
+
+/// Whether two image paths name the same file.
+///
+/// Comparing the strings is not enough on Windows, for two reasons that both
+/// showed up on a real machine: paths are case-insensitive, and a scoop install
+/// starts the kernel through its `apps\<app>\current\mihomo.exe` junction while
+/// the running process reports the versioned directory it really lives in. The
+/// comparison therefore resolves both sides (junctions, symlinks and `..`) and
+/// falls back to the literal path when a file cannot be resolved — a kernel that
+/// is already gone must still compare equal to the path recorded for it.
+pub fn same_image(a: &Path, b: &Path) -> bool {
+    let resolved = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (a, b) = (resolved(a), resolved(b));
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// Whether a path is a scoop shim: a launcher that carries the kernel's name
+/// (`shims\mihomo.exe`) and starts the real binary as its child, so it is not the
+/// kernel a caller is looking for.
+pub fn is_shim(path: &Path) -> bool {
+    path.to_string_lossy()
+        .to_ascii_lowercase()
+        .contains(r"scoop\shims")
 }
 
 /// All running `mihomo.exe` processes, with their real image paths.
@@ -82,6 +116,7 @@ pub fn list_mihomo() -> Vec<Process> {
                     let (path, denied) = image_path(entry.th32ProcessID);
                     found.push(Process {
                         pid: entry.th32ProcessID,
+                        parent: entry.th32ParentProcessID,
                         path,
                         denied,
                     });
@@ -103,11 +138,15 @@ pub fn list_mihomo() -> Vec<Process> {
 /// provably ours nor provably somebody else's, so it is reported as unverified
 /// instead of being silently ignored — this process can do nothing about it,
 /// while the elevated helper can read the path and stop it if it matches.
+///
+/// Any failure counts as unverifiable, not just an access denial: a process whose
+/// image cannot be named must never be filed under "somebody else's", because the
+/// conclusion drawn from that is "nothing left to stop".
 fn image_path(pid: u32) -> (PathBuf, bool) {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            return (PathBuf::new(), GetLastError() == ERROR_ACCESS_DENIED);
+            return (PathBuf::new(), true);
         }
         let mut buffer = [0u16; 520];
         let mut size = buffer.len() as u32;
@@ -188,16 +227,69 @@ pub struct StopOutcome {
     pub denied: usize,
 }
 
-/// Stop every `mihomo.exe` running from `exe`. Nothing else is touched: a
-/// process whose path is unknown is counted, never guessed at.
-pub fn stop_matching(exe: &Path) -> Result<StopOutcome, String> {
-    let mut outcome = StopOutcome::default();
-    for process in list_mihomo() {
-        if process.denied {
-            outcome.denied += 1;
-            continue;
+/// The `mihomo.exe` processes that belong to the same family as `roots`.
+///
+/// A launcher runs in both directions. Scoop's shim is itself called
+/// `mihomo.exe` and starts the real kernel as its child, so stopping only the
+/// image the tray recorded leaves the kernel running — and stopping only the
+/// kernel leaves the shim behind, waiting for it. Both are the same family, and
+/// both have to go for the ports to be free.
+///
+/// Only processes already in `processes` are followed, so an unrelated shell that
+/// happens to be a parent is never dragged in.
+fn family(processes: &[Process], roots: &[u32]) -> Vec<u32> {
+    let mut family: Vec<u32> = roots.to_vec();
+    loop {
+        let mut grew = false;
+        for process in processes {
+            if family.contains(&process.pid) {
+                // Up to a `mihomo.exe` parent: that is the launcher.
+                let mihomo_parent = process.parent != 0
+                    && processes.iter().any(|other| other.pid == process.parent);
+                if mihomo_parent && !family.contains(&process.parent) {
+                    family.push(process.parent);
+                    grew = true;
+                }
+            } else if family.contains(&process.parent) {
+                // Down to everything a family member started.
+                family.push(process.pid);
+                grew = true;
+            }
         }
-        if process.path != exe {
+        if !grew {
+            break;
+        }
+    }
+    family
+}
+
+/// Stop the kernel: every `mihomo.exe` whose image is `exe`, plus the family of
+/// `root` when the caller knows which process it is responsible for.
+///
+/// The tray only has a path, the elevated helper has the PID it was handed —
+/// which it resolved itself, so the path it passes here is the one it read from
+/// that process. Both end up stopping a launcher and the kernel it launched. A
+/// process whose path is unknown is counted as denied, never guessed at.
+pub fn stop_kernel(root: Option<u32>, exe: &Path) -> Result<StopOutcome, String> {
+    let processes = list_mihomo();
+    let mut roots: Vec<u32> = Vec::new();
+    if let Some(pid) = root {
+        roots.push(pid);
+    }
+    roots.extend(
+        processes
+            .iter()
+            .filter(|process| !process.denied && same_image(&process.path, exe))
+            .map(|process| process.pid),
+    );
+    let family = family(&processes, &roots);
+
+    let mut outcome = StopOutcome::default();
+    for process in &processes {
+        if !family.contains(&process.pid) {
+            if process.denied {
+                outcome.denied += 1;
+            }
             continue;
         }
         match kill(process.pid) {
@@ -218,6 +310,10 @@ pub fn stop_matching(exe: &Path) -> Result<StopOutcome, String> {
 /// kernel is the last step, so a failure there leaves the machine without a
 /// kernel rather than with two of them. The replacement is started exactly the
 /// way the kernel it replaces was running, its arguments included.
+///
+/// Success is answered with the PID of the new kernel: the caller cannot read an
+/// elevated process's image path, so this is how it learns which process it now
+/// owns.
 pub fn start_kernel_elevated(args: &[String]) -> i32 {
     let Some(pid) = parse_pid(args) else {
         return HELPER_BAD_ARGS;
@@ -230,7 +326,7 @@ pub fn start_kernel_elevated(args: &[String]) -> i32 {
     let Some(kernel_args) = command_line(pid).map(|argv| argv[1..].to_vec()) else {
         return HELPER_UNREADABLE;
     };
-    match stop_matching(&exe) {
+    match stop_kernel(Some(pid), &exe) {
         // A `mihomo.exe` that survives means the ports are still taken: starting a
         // second kernel would only produce two half-working ones.
         Ok(outcome) if outcome.denied > 0 => return HELPER_NOT_STOPPED,
@@ -238,9 +334,9 @@ pub fn start_kernel_elevated(args: &[String]) -> i32 {
         Err(_) => return HELPER_NOT_STOPPED,
     }
     match start(&exe, &kernel_args) {
-        // The child is deliberately dropped: it must outlive the helper, and an
-        // `std::process::Child` does not kill on drop.
-        Ok(_) => HELPER_OK,
+        // The child is dropped once its PID is read: it must outlive the helper,
+        // and an `std::process::Child` does not kill on drop.
+        Ok(child) => i32::try_from(child.id()).unwrap_or(HELPER_NOT_STARTED),
         Err(_) => HELPER_NOT_STARTED,
     }
 }
@@ -255,7 +351,7 @@ pub fn stop_kernel_elevated(args: &[String]) -> i32 {
     let Some(exe) = kernel_image(pid) else {
         return HELPER_BAD_ARGS;
     };
-    match stop_matching(&exe) {
+    match stop_kernel(Some(pid), &exe) {
         Ok(outcome) if outcome.stopped > 0 => HELPER_OK,
         // Told apart from "nothing matched", because only one of the two means
         // that asking with more rights could ever help.
@@ -458,5 +554,68 @@ mod tests {
         let empty = parse_command_line("");
         assert!(empty.len() <= 1, "unexpected {empty:?}");
         assert!(parse_pid(&empty).is_none());
+    }
+
+    #[test]
+    fn paths_are_compared_the_way_windows_resolves_them() {
+        let dir = std::env::temp_dir().join("mihomo-tray-test-same-image");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("mihomo.exe");
+        std::fs::write(&file, b"x").unwrap();
+
+        // The same file spelled differently is the same kernel.
+        let shouted = PathBuf::from(file.to_string_lossy().to_uppercase());
+        assert!(same_image(&file, &shouted), "{file:?} vs {shouted:?}");
+        // ... and so is a path that takes a detour through `..`.
+        let detour = dir.join("sub").join("..").join("mihomo.exe");
+        assert!(same_image(&file, &detour), "{file:?} vs {detour:?}");
+
+        // A different image is a different kernel.
+        let other = dir.join("other.exe");
+        std::fs::write(&other, b"x").unwrap();
+        assert!(!same_image(&file, &other));
+        // A file that is already gone still equals the path recorded for it.
+        let gone = dir.join("gone.exe");
+        assert!(same_image(&gone, &gone));
+        assert!(!same_image(&gone, &file));
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(&other);
+    }
+
+    fn process(pid: u32, parent: u32, path: &str, denied: bool) -> Process {
+        Process {
+            pid,
+            parent,
+            path: PathBuf::from(path),
+            denied,
+        }
+    }
+
+    #[test]
+    fn a_launcher_and_the_kernel_it_started_are_one_family() {
+        const SHIM: &str = r"D:\App\Scoop\shims\mihomo.exe";
+        const KERNEL: &str = r"D:\App\Scoop\apps\mihomo-v3\current\mihomo.exe";
+        let processes = vec![
+            process(10, 999, SHIM, false),
+            process(11, 10, KERNEL, false),
+            process(12, 999, r"C:\other\mihomo.exe", false),
+        ];
+        // Handed the launcher, the kernel under it goes too — this is what the
+        // elevated helper used to miss, leaving a kernel holding every port.
+        assert_eq!(family(&processes, &[10]), vec![10, 11]);
+        // Handed the kernel, the launcher above it comes along, so no shim is
+        // left waiting for a child that is gone.
+        assert_eq!(family(&processes, &[11]), vec![11, 10]);
+        // An unrelated instance is never dragged in.
+        assert!(!family(&processes, &[10]).contains(&12));
+    }
+
+    #[test]
+    fn a_scoop_shim_is_recognised_as_a_launcher() {
+        assert!(is_shim(Path::new(r"D:\App\Scoop\shims\mihomo.exe")));
+        assert!(!is_shim(Path::new(
+            r"D:\App\Scoop\apps\mihomo-v3\current\mihomo.exe"
+        )));
     }
 }
