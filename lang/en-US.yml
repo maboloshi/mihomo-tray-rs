@@ -31,7 +31,6 @@ menu:
   empty: (empty)
   autostart: Start with Windows
   reload: Reload config
-  restart_admin: Restart as administrator
   exit: Exit
   exit_stop_kernel: Exit and stop Mihomo
   exit_only: Exit only
@@ -40,6 +39,8 @@ status:
   running: "Mihomo status: running ({mode})"
   controller_unreachable: "Mihomo status: kernel running, controller unreachable"
   stopped: "Mihomo status: not running"
+  elevating_kernel: "Restarting the kernel as administrator…"
+  elevating_stop: "Stopping the kernel as administrator…"
 
 state:
   on: "on"
@@ -71,6 +72,11 @@ error:
   write_autostart: "Failed to write the autostart entry: {error}"
   delete_autostart: "Failed to delete the autostart entry: {error}"
   elevate_cancelled: Elevation was cancelled or failed
+  elevate_timeout: Timed out waiting for administrator consent
+  elevated_kernel_failed: Failed to start the kernel with administrator rights
+  tun_ineffective: TUN did not take effect (usually needs administrator rights)
+  kernel_needs_admin: "The kernel runs with administrator rights and cannot be stopped by this program"
+  kernel_args: "Could not read the kernel's own command line, so it was not restarted"
   message_window: Failed to create the message window
   open_internet_settings: "Failed to open Internet Settings: {error}"
   set_proxy_enable: "Failed to set ProxyEnable: {error}"

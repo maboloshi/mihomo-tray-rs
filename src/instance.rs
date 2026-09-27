@@ -1,7 +1,7 @@
 //! Single-instance guard: a named mutex held for the lifetime of the process.
 //!
-//! It can be released on purpose before handing over to an elevated copy,
-//! otherwise that copy would see the mutex as taken and exit silently.
+//! The elevated helper is the same executable, so `main` answers it before this
+//! guard is taken: a second process is expected there, not a second tray.
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
@@ -36,14 +36,4 @@ pub fn acquire() -> bool {
         HANDLE.store(handle as isize, Ordering::SeqCst);
     }
     true
-}
-
-/// Give up the guard so a freshly launched copy can take over.
-pub fn release() {
-    let handle = HANDLE.swap(0, Ordering::SeqCst);
-    if handle != 0 {
-        unsafe {
-            CloseHandle(handle as _);
-        }
-    }
 }

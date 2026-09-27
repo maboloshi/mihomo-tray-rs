@@ -39,7 +39,7 @@ pub fn kernel_candidates(settings: &Settings) -> Vec<PathBuf> {
     }
     if let Some(running) = proc::list_mihomo()
         .into_iter()
-        .find(|p| !is_shim(&p.path))
+        .find(|p| !p.path.as_os_str().is_empty() && !is_shim(&p.path))
         .map(|p| p.path)
     {
         out.push(running);
@@ -77,9 +77,17 @@ pub fn kernel_candidates(settings: &Settings) -> Vec<PathBuf> {
 }
 
 pub fn find_kernel(settings: &Settings) -> Option<PathBuf> {
-    kernel_candidates(settings)
+    let candidates: Vec<PathBuf> = kernel_candidates(settings)
         .into_iter()
-        .find(|p| p.is_file())
+        .filter(|p| p.is_file())
+        .collect();
+    // A scoop shim is a launcher, not the kernel: stopping it does not stop the
+    // kernel it started, so a real binary is always preferred when one exists.
+    candidates
+        .iter()
+        .find(|path| !is_shim(path))
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
 }
 
 /// Candidate configuration files, used only to read `external-controller`.
@@ -99,6 +107,56 @@ pub fn config_candidates(settings: &Settings) -> Vec<PathBuf> {
         out.push(dir.join("config.yaml"));
     }
     out
+}
+
+/// The kernel's command line: the configured arguments, plus where its
+/// configuration lives.
+///
+/// This is only for the kernel this program starts itself; a running kernel is
+/// restarted from its own command line, which is the only source that is right by
+/// construction. Two things are added, each only while the arguments do not name
+/// it themselves:
+///
+/// * `-d <dir>` — mihomo's directory for the configuration, its cache and its
+///   geodata. It matters because an elevated kernel may run under another account,
+///   where `%USERPROFILE%` — and with it mihomo's own default directory — is not
+///   the one the tray just read.
+/// * `-f <file>` — an explicitly configured file is not necessarily called
+///   `config.yaml`, and `-d` alone would make the kernel look for that name.
+pub fn launch_args(settings: &Settings) -> Vec<String> {
+    let explicit = (!settings.mihomo_config.is_empty())
+        .then(|| PathBuf::from(&settings.mihomo_config))
+        .filter(|path| path.is_file());
+    let file = explicit.clone().or_else(|| {
+        config_candidates(settings)
+            .into_iter()
+            .find(|p| p.is_file())
+    });
+    let mut args = settings.mihomo_args.clone();
+    let Some(file) = file else {
+        return args;
+    };
+    if !names_flag(&args, "d") {
+        if let Some(dir) = file.parent() {
+            args.push("-d".to_string());
+            args.push(dir.display().to_string());
+        }
+    }
+    if explicit.is_some() && !names_flag(&args, "f") {
+        args.push("-f".to_string());
+        args.push(file.display().to_string());
+    }
+    args
+}
+
+/// Whether the arguments already carry a Go-style flag: `-d`, `--d`, `-d=…`,
+/// `--d=…`. mihomo has no long spellings of its own.
+fn names_flag(args: &[String], flag: &str) -> bool {
+    let pair = [format!("-{flag}"), format!("--{flag}")];
+    args.iter().any(|arg| {
+        pair.iter().any(|name| arg == name)
+            || pair.iter().any(|name| arg.starts_with(&format!("{name}=")))
+    })
 }
 
 /// Scan a mihomo configuration file for `external-controller` and `secret`.
@@ -218,5 +276,57 @@ mod tests {
         };
         let client = find_controller(&settings).unwrap();
         assert_eq!(client.address(), "127.0.0.1:1234");
+    }
+
+    /// A scratch directory with a configuration file of a non-default name.
+    fn scratch(file_name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join("mihomo-tray-test-args");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(file_name);
+        std::fs::write(&file, "mixed-port: 7890\n").unwrap();
+        (dir, file)
+    }
+
+    #[test]
+    fn an_explicit_config_file_is_named_with_its_directory() {
+        let (dir, file) = scratch("custom.yaml");
+        let settings = Settings {
+            mihomo_config: file.display().to_string(),
+            mihomo_args: vec!["-ext-ctl".to_string(), "127.0.0.1:9999".to_string()],
+            ..Settings::default()
+        };
+        assert_eq!(
+            launch_args(&settings),
+            vec![
+                "-ext-ctl".to_string(),
+                "127.0.0.1:9999".to_string(),
+                "-d".to_string(),
+                dir.display().to_string(),
+                "-f".to_string(),
+                file.display().to_string(),
+            ]
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn arguments_that_already_name_the_location_are_left_alone() {
+        let (_, file) = scratch("already.yaml");
+        for named in [
+            vec!["-d", r"C:\elsewhere"],
+            vec!["--d", r"C:\elsewhere"],
+            vec!["-d=C:\\elsewhere"],
+            vec!["--d=C:\\elsewhere"],
+        ] {
+            let mut args: Vec<String> = named.iter().map(|arg| arg.to_string()).collect();
+            args.extend(["-f".to_string(), r"C:\elsewhere\config.yaml".to_string()]);
+            let settings = Settings {
+                mihomo_config: file.display().to_string(),
+                mihomo_args: args.clone(),
+                ..Settings::default()
+            };
+            assert_eq!(launch_args(&settings), args, "for {named:?}");
+        }
+        let _ = std::fs::remove_file(&file);
     }
 }

@@ -4,7 +4,7 @@
 //! posts commands to the worker, which refreshes the snapshot and pokes the UI
 //! window when it is done.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
@@ -29,8 +29,20 @@ pub enum Command {
     },
     Unfix(String),
     Reload,
+    /// Ask for the rights to stop a kernel that is not ours to end.
+    StopKernelElevated,
     /// Re-read everything (used after actions handled on the UI thread).
     Refresh,
+}
+
+/// How "exit and stop mihomo" can end.
+enum StopResult {
+    Stopped,
+    /// No process matched the known kernel path.
+    Absent,
+    /// A kernel is running that this process is not allowed to inspect.
+    NeedsAdmin,
+    Refused(String),
 }
 
 pub struct App {
@@ -38,9 +50,10 @@ pub struct App {
     pub state: Shared,
     pub hwnd: HWND,
     pub icons: Icons,
-    pub admin: bool,
     pub menu_open: bool,
     pub kernel_path: Option<PathBuf>,
+    /// The kernel this program started itself, so "exit and stop mihomo" can end
+    /// it directly. Cleared once an elevated helper takes the kernel over.
     kernel: Option<Child>,
     tx: Option<Sender<Command>>,
     fatal: Option<String>,
@@ -61,7 +74,6 @@ impl App {
             state,
             hwnd: std::ptr::null_mut(),
             icons: Icons::new(),
-            admin: win::elevate::is_admin(),
             menu_open: false,
             kernel_path,
             kernel: None,
@@ -75,6 +87,12 @@ impl App {
         self.kernel = Some(child);
     }
 
+    /// The kernel was replaced by the elevated helper, so the child handle is
+    /// stale: from now on the kernel is only ever matched by path.
+    pub fn forget_kernel(&mut self) {
+        self.kernel = None;
+    }
+
     /// Create the worker and register the tray icon; call once the window exists.
     pub fn start(&mut self, client: Client) {
         match spawn_worker(
@@ -82,6 +100,7 @@ impl App {
             self.state.clone(),
             self.hwnd as isize,
             self.settings.clone(),
+            self.kernel_path.clone(),
             self.fatal.take(),
         ) {
             Ok(tx) => self.tx = Some(tx),
@@ -166,25 +185,17 @@ impl App {
                     self.send(Command::Refresh);
                 }
             }
-            Action::RestartAsAdmin => {
-                // Hand the single-instance guard over before the elevated copy
-                // starts, otherwise it would see the mutex as taken and exit
-                // without a tray icon.
-                crate::instance::release();
-                match win::elevate::relaunch_as_admin() {
-                    Ok(()) => self.shutdown(),
-                    Err(error) => {
-                        crate::instance::acquire();
-                        self.set_error(error);
-                    }
-                }
-            }
-            Action::ExitStopKernel => {
-                if let Err(error) = self.stop_kernel() {
-                    self.set_error(error);
-                }
-                self.shutdown();
-            }
+            Action::ExitStopKernel => match self.stop_kernel() {
+                // Ours to end (or nothing to end): leave right away.
+                StopResult::Stopped | StopResult::Absent => self.shutdown(),
+                // An elevated kernel can only be stopped with the rights it has,
+                // so the worker asks for them; the process stays alive until it
+                // knows whether that worked.
+                StopResult::NeedsAdmin => self.send(Command::StopKernelElevated),
+                // Keeping the tray alive is the point: the user has to see why
+                // nothing was stopped, and can still pick "exit only".
+                StopResult::Refused(error) => self.set_error(error),
+            },
             Action::ExitOnly => self.shutdown(),
         }
     }
@@ -192,34 +203,46 @@ impl App {
     /// Stop only the kernel instance this program is responsible for. Fails
     /// closed: an unknown kernel path or an unknown process path is never
     /// treated as ours, so we cannot kill a mihomo the user started elsewhere.
-    fn stop_kernel(&mut self) -> Result<(), String> {
-        if let Some(mut child) = self.kernel.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(());
-        }
-        let Some(path) = self.kernel_path.clone() else {
-            return Err(i18n::t().error_no_kernel_path.to_string());
+    fn stop_kernel(&mut self) -> StopResult {
+        let child = self.kernel.take();
+        // The recorded target wins: it is the image path this program actually
+        // started or replaced, while the discovered path is only a guess.
+        let target = state::read(&self.state)
+            .kernel_target
+            .or_else(|| self.kernel_path.clone());
+        let Some(path) = target else {
+            // Without a known path the only process we can end is the one this
+            // program started itself.
+            return match child {
+                Some(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    StopResult::Stopped
+                }
+                None => StopResult::Refused(i18n::t().error_no_kernel_path.to_string()),
+            };
         };
-        let mut stopped = 0usize;
-        for process in proc::list_mihomo() {
-            if process.path.is_empty() {
-                // OpenProcess was denied (e.g. an elevated instance): ownership
-                // cannot be proven, so leave it alone.
-                continue;
-            }
-            if process.path == path {
-                proc::kill(process.pid)?;
-                stopped += 1;
-            }
+        // Path matching covers both the kernel this program started and an
+        // elevated one that replaced it; a stale child handle would otherwise
+        // report success without stopping anything.
+        match proc::stop_matching(&path) {
+            Err(error) => StopResult::Refused(error),
+            Ok(outcome) if outcome.stopped > 0 => StopResult::Stopped,
+            // A kernel we are not allowed to end: ask for the rights.
+            Ok(outcome) if outcome.denied > 0 => StopResult::NeedsAdmin,
+            // Nothing matched by path: fall back to the handle we still hold.
+            Ok(_) => match child {
+                Some(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    StopResult::Stopped
+                }
+                None => StopResult::Absent,
+            },
         }
-        if stopped == 0 {
-            return Err(i18n::t().error_no_matching_kernel.to_string());
-        }
-        Ok(())
     }
 
-    fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) {
         win::remove_icon(self.hwnd);
         win::quit(self.hwnd);
     }
@@ -230,11 +253,24 @@ impl App {
 /// a failure.
 type Outcome = Option<Option<String>>;
 
+/// How long a just-restarted kernel may take to answer again.
+const KERNEL_START_BUDGET: Duration = Duration::from_secs(10);
+
+/// Everything an action needs besides the command itself.
+struct Worker<'a> {
+    client: &'a Client,
+    state: &'a Shared,
+    hwnd: isize,
+    /// The kernel this program may start or replace.
+    kernel_path: Option<&'a Path>,
+}
+
 fn spawn_worker(
     client: Client,
     state: Shared,
     hwnd: isize,
     settings: Settings,
+    kernel_path: Option<PathBuf>,
     fatal: Option<String>,
 ) -> Result<Sender<Command>, String> {
     let (tx, rx) = mpsc::channel::<Command>();
@@ -243,6 +279,12 @@ fn spawn_worker(
         .name("mihomo-poll".into())
         .stack_size(256 * 1024)
         .spawn(move || {
+            let worker = Worker {
+                client: &client,
+                state: &state,
+                hwnd,
+                kernel_path: kernel_path.as_deref(),
+            };
             let mut outcome: Outcome = fatal.map(Some);
             let mut version = String::new();
             loop {
@@ -253,7 +295,7 @@ fn spawn_worker(
                     PostMessageW(hwnd as HWND, win::WM_REFRESH, 0, 0);
                 }
                 match rx.recv_timeout(poll) {
-                    Ok(command) => outcome = Some(execute(&client, &command)),
+                    Ok(command) => outcome = Some(execute(&worker, &command)),
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
@@ -263,16 +305,165 @@ fn spawn_worker(
         .map_err(|error| i18n::t().error_spawn_worker(&error.to_string()))
 }
 
-fn execute(client: &Client, command: &Command) -> Option<String> {
+fn execute(worker: &Worker, command: &Command) -> Option<String> {
     let result = match command {
-        Command::SetMode(mode) => client.set_mode(mode),
-        Command::SetTun(enable) => client.set_tun(*enable),
-        Command::Select { group, member } => client.select(group, member),
-        Command::Unfix(group) => client.unfix(group),
-        Command::Reload => client.reload(),
+        Command::SetMode(mode) => worker.client.set_mode(mode),
+        // TUN is not a plain request: see `set_tun`.
+        Command::SetTun(enable) => return set_tun(worker, *enable),
+        Command::Select { group, member } => worker.client.select(group, member),
+        Command::Unfix(group) => worker.client.unfix(group),
+        Command::Reload => worker.client.reload(),
+        Command::StopKernelElevated => return stop_kernel_elevated(worker),
         Command::Refresh => Ok(()),
     };
     result.err()
+}
+
+/// Turn TUN on or off.
+///
+/// The controller answers `204` even when the kernel could not create the
+/// adapter — it only writes a log line — so the request itself proves nothing
+/// and the read-back decides. A kernel that answers while TUN stays off is a
+/// kernel without administrator rights, which is the one thing TUN needs: it is
+/// replaced by an elevated one (a second, short-lived process of this program,
+/// started through the UAC prompt) and the request is repeated.
+fn set_tun(worker: &Worker, enable: bool) -> Option<String> {
+    if !enable {
+        return worker.client.set_tun(false).err();
+    }
+    if let Err(error) = worker.client.set_tun(true) {
+        return Some(error);
+    }
+    if read_tun(worker.client) == Some(true) {
+        return None;
+    }
+    let Some(pid) = kernel_pid(worker) else {
+        return Some(i18n::t().error_no_kernel_path.to_string());
+    };
+    let params = win::elevate::kernel_start_params(pid);
+
+    // The helper blocks until it is done, and the UAC prompt is part of that, so
+    // say what is happening before waiting; the note is cleared right after.
+    show_note(worker, Some(i18n::t().status_elevating_kernel.to_string()));
+    let elevated = win::elevate::run_self_elevated(&params);
+    show_note(worker, None);
+    // The prompt was cancelled, or it timed out while the helper was still
+    // working: in the second case the kernel may already have been replaced, so
+    // the child handle the UI thread holds is not worth keeping. From here on the
+    // kernel is matched by PID and path instead.
+    forget_child(worker);
+    let code = match elevated {
+        Ok(code) => code,
+        Err(error) => return Some(error),
+    };
+    if code != proc::HELPER_OK {
+        return Some(helper_failure(code));
+    }
+
+    wait_for_kernel(worker.client);
+    if let Err(error) = worker.client.set_tun(true) {
+        return Some(error);
+    }
+    match read_tun(worker.client) {
+        Some(true) => None,
+        _ => Some(i18n::t().error_tun_ineffective.to_string()),
+    }
+}
+
+/// The TUN flag as the controller reports it, `None` while it cannot be read.
+fn read_tun(client: &Client) -> Option<bool> {
+    client.configs().ok().map(|(_, _, tun)| tun)
+}
+
+/// Ask for the rights to stop the kernel, and tell the UI thread to leave once it
+/// is gone. The UAC prompt blocks this thread, exactly like the TUN restart.
+fn stop_kernel_elevated(worker: &Worker) -> Option<String> {
+    let Some(pid) = kernel_pid(worker) else {
+        return Some(i18n::t().error_no_kernel_path.to_string());
+    };
+    let params = win::elevate::kernel_stop_params(pid);
+
+    show_note(worker, Some(i18n::t().status_elevating_stop.to_string()));
+    let elevated = win::elevate::run_self_elevated(&params);
+    show_note(worker, None);
+    match elevated {
+        Err(error) => Some(error),
+        Ok(proc::HELPER_OK) => {
+            unsafe {
+                PostMessageW(worker.hwnd as HWND, win::WM_EXIT, 0, 0);
+            }
+            None
+        }
+        Ok(code) => Some(helper_failure(code)),
+    }
+}
+
+/// What a failed helper run means to the user. The helper names the reason, so it
+/// does not have to be guessed from the exit code at every call site.
+fn helper_failure(code: i32) -> String {
+    let messages = i18n::t();
+    match code {
+        proc::HELPER_DENIED => messages.error_kernel_needs_admin.to_string(),
+        proc::HELPER_UNREADABLE => messages.error_kernel_args.to_string(),
+        proc::HELPER_NOT_STOPPED => messages.error_no_matching_kernel.to_string(),
+        _ => messages.error_elevated_kernel_failed.to_string(),
+    }
+}
+
+/// The PID of the kernel to work on: the image this program recorded first, then
+/// the one discovery knows, then whatever is left running.
+///
+/// A PID is what survives the rights a tray does not have — the image path of an
+/// elevated kernel cannot be read from here at all — which is exactly why the
+/// elevated helper is handed one instead of a path.
+fn kernel_pid(worker: &Worker) -> Option<u32> {
+    let running = proc::list_mihomo();
+    let matches = |path: &Path| {
+        running
+            .iter()
+            .find(|process| !process.denied && process.path == path)
+            .map(|process| process.pid)
+    };
+    let recorded = state::read(worker.state)
+        .kernel_target
+        .as_deref()
+        .and_then(matches);
+    recorded
+        .or_else(|| worker.kernel_path.and_then(matches))
+        .or_else(|| match running.len() {
+            // Nothing matched by path: a single kernel is unambiguous, and among
+            // several the higher-integrity one is the one holding the ports.
+            1 => Some(running[0].pid),
+            _ => running.iter().find(|process| process.denied).map(|p| p.pid),
+        })
+}
+
+/// The child handle is only worth anything while the process this program started
+/// is still the one running: an elevated helper replaces it.
+fn forget_child(worker: &Worker) {
+    unsafe {
+        PostMessageW(worker.hwnd as HWND, win::WM_KERNEL_REPLACED, 0, 0);
+    }
+}
+
+/// Wait, bounded, for a kernel that was just restarted to answer again.
+fn wait_for_kernel(client: &Client) {
+    let deadline = std::time::Instant::now() + KERNEL_START_BUDGET;
+    while std::time::Instant::now() < deadline {
+        if client.alive() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Publish what the worker is doing right now, so a menu the user opens while it
+/// blocked says something.
+fn show_note(worker: &Worker, message: Option<String>) {
+    state::write_status_note(worker.state, message);
+    unsafe {
+        PostMessageW(worker.hwnd as HWND, win::WM_REFRESH, 0, 0);
+    }
 }
 
 /// Rebuild the snapshot from the outside world.
@@ -287,6 +478,8 @@ fn refresh(client: &Client, shared: &Shared, version: &mut String, outcome: Outc
         sysproxy: win::proxy::is_enabled(),
         autostart: win::autostart::is_enabled(),
         action_error: previous.action_error,
+        status_note: previous.status_note,
+        kernel_target: previous.kernel_target,
         ..Default::default()
     };
 
@@ -323,6 +516,9 @@ fn tooltip(snapshot: &Snapshot) -> String {
     let messages = i18n::t();
     let mut text = String::from("mihomo-tray\n");
     text.push_str(&snapshot.status_line());
+    if let Some(note) = snapshot.status_note.as_deref() {
+        text.push_str(&format!("\n{note}"));
+    }
     if snapshot.controller_ok {
         if !snapshot.version.is_empty() {
             text.push_str(&format!("\n{}", messages.tooltip_kernel(&snapshot.version)));

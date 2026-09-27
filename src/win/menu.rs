@@ -27,7 +27,6 @@ pub enum Action {
     Unfix(String),
     ToggleAutostart,
     Reload,
-    RestartAsAdmin,
     ExitStopKernel,
     ExitOnly,
 }
@@ -43,13 +42,16 @@ impl Menu {
             .and_then(|index| self.actions.get(index))
     }
 
-    pub fn build(snapshot: &Snapshot, settings: &Settings, admin: bool) -> Menu {
+    pub fn build(snapshot: &Snapshot, settings: &Settings) -> Menu {
         let messages = i18n::t();
         let mut builder = Builder::default();
         let root = builder.new_menu();
         let ready = snapshot.controller_ok;
 
         builder.plain(root, &snapshot.status_line(), false);
+        if let Some(note) = snapshot.status_note.as_deref() {
+            builder.plain(root, &truncate(note, 90), false);
+        }
         if let Some(error) = snapshot.error().map(str::to_string) {
             builder.plain(root, &truncate(&format!("⚠ {error}"), 90), false);
         }
@@ -119,15 +121,6 @@ impl Menu {
             true,
         );
         builder.item(root, &messages.menu_reload, Action::Reload, false, ready);
-        if !admin {
-            builder.item(
-                root,
-                &messages.menu_restart_admin,
-                Action::RestartAsAdmin,
-                false,
-                true,
-            );
-        }
 
         builder.separator(root);
         let exit_menu = builder.new_menu();
@@ -508,14 +501,16 @@ mod tests {
 
     #[test]
     fn groups_are_ordered_by_config_then_global_then_name() {
-        let mut settings = Settings::default();
-        settings.groups_order = vec!["Zulu".to_string()];
+        let settings = Settings {
+            groups_order: vec!["Zulu".to_string()],
+            ..Settings::default()
+        };
         let snapshot = snapshot(vec![
             group("Alpha", true, "DIRECT", &["DIRECT"]),
             group("GLOBAL", true, "DIRECT", &["DIRECT"]),
             group("Zulu", true, "DIRECT", &["DIRECT"]),
         ]);
-        let menu = Menu::build(&snapshot, &settings, true);
+        let menu = Menu::build(&snapshot, &settings);
         let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
         assert!(!groups.is_null(), "groups submenu missing");
         assert_eq!(labels(groups), vec!["Zulu", "GLOBAL", "Alpha"]);
@@ -527,7 +522,7 @@ mod tests {
             group("GLOBAL", true, "B", &["A", "B"]),
             group("Auto", false, "A", &["A", "B"]),
         ]);
-        let menu = Menu::build(&snapshot, &Settings::default(), true);
+        let menu = Menu::build(&snapshot, &Settings::default());
         let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
         let global = find_submenu(groups, "GLOBAL");
         let auto = find_submenu(groups, &i18n::t().menu_group_label("Auto", "URLTest"));
@@ -565,7 +560,7 @@ mod tests {
         let mut auto = group("Auto", true, "A", &["A", "B"]);
         auto.kind = "URLTest".to_string();
         auto.fixed = "A".to_string();
-        let menu = Menu::build(&snapshot(vec![auto]), &Settings::default(), true);
+        let menu = Menu::build(&snapshot(vec![auto]), &Settings::default());
         let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
         let pinned = i18n::t().menu_group_label_pinned("Auto", "URLTest");
         assert_eq!(labels(groups), vec![pinned.clone()]);
@@ -610,7 +605,7 @@ mod tests {
             .map(|name| group(name, true, "missing", &names))
             .collect();
         let started = std::time::Instant::now();
-        let menu = Menu::build(&snapshot(groups), &Settings::default(), true);
+        let menu = Menu::build(&snapshot(groups), &Settings::default());
         let elapsed = started.elapsed();
         let total = count_items(menu.handle);
         assert!(
@@ -623,7 +618,7 @@ mod tests {
     #[test]
     fn control_characters_and_ampersands_in_names_are_neutralised() {
         let snapshot = snapshot(vec![group("G&1", true, "a\nb", &["a\nb", "ok"])]);
-        let menu = Menu::build(&snapshot, &Settings::default(), true);
+        let menu = Menu::build(&snapshot, &Settings::default());
         let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
         assert_eq!(label_at(groups, 0), "G&&1");
         let group_menu = find_submenu(groups, "G&&1");
@@ -640,7 +635,7 @@ mod tests {
     fn disabled_status_item_has_no_action() {
         let mut snapshot = snapshot(Vec::new());
         snapshot.controller_ok = false;
-        let menu = Menu::build(&snapshot, &Settings::default(), false);
+        let menu = Menu::build(&snapshot, &Settings::default());
         assert_ne!(
             unsafe { GetMenuState(menu.handle, 0, MF_BYCOMMAND) },
             0xffff_ffff

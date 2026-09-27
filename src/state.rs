@@ -1,5 +1,6 @@
 //! Shared runtime state. The worker thread writes, the UI thread reads.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Default)]
@@ -34,9 +35,17 @@ pub struct Snapshot {
     /// Last failed action (mode/TUN/select/reload, registry writes). Survives
     /// refreshes until the next action.
     pub action_error: Option<String>,
+    /// What the worker is busy with right now, while it blocks on something the
+    /// user should see (the UAC prompt of an elevated kernel restart). Cleared as
+    /// soon as the action is over.
+    pub status_note: Option<String>,
     /// Controller reachability, owned by the refresh loop: set when the
     /// controller stops answering and cleared as soon as it is back.
     pub controller_error: Option<String>,
+    /// The exact image path of the kernel this program started or replaced last.
+    /// Stopping uses it first, because that is the only path that is certainly
+    /// the kernel's own — the discovered path is a fallback.
+    pub kernel_target: Option<PathBuf>,
 }
 
 impl Snapshot {
@@ -101,4 +110,22 @@ pub fn write_action_error(state: &Shared, message: String) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .action_error = Some(message);
+}
+
+/// Show (or clear) what the worker is doing right now. Unlike an error this is
+/// not a result: the next refresh keeps it only until the worker clears it.
+pub fn write_status_note(state: &Shared, note: Option<String>) {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .status_note = note;
+}
+
+/// Remember which kernel image this program started or replaced, so stopping it
+/// does not have to guess between the configured and the running path.
+pub fn write_kernel_target(state: &Shared, path: Option<PathBuf>) {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .kernel_target = path;
 }

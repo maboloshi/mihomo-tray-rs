@@ -21,6 +21,13 @@ const KERNEL_STARTUP_BUDGET: Duration = Duration::from_secs(5);
 const KERNEL_PROBE_TIMEOUT_MS: u32 = 500;
 
 fn main() {
+    // The elevated helper is a second process of this same executable: it runs
+    // before the single-instance guard (which exists for the tray) and never
+    // creates a window or an icon.
+    if let Some(code) = run_kernel_helper() {
+        std::process::exit(code);
+    }
+
     if !instance::acquire() {
         return;
     }
@@ -43,7 +50,8 @@ fn main() {
         if !discovered.alive() && settings.mihomo_auto_start {
             match &kernel_path {
                 Some(path) if mihomo::proc::list_mihomo().is_empty() => {
-                    match mihomo::proc::start(path, &settings.mihomo_args) {
+                    let args = mihomo::discover::launch_args(&settings);
+                    match mihomo::proc::start(path, &args) {
                         Ok(started) => {
                             child = Some(started);
                             wait_for_controller(&settings);
@@ -64,6 +72,11 @@ fn main() {
     // `App` deliberately lives for the whole process: the window procedure holds
     // a raw pointer to it, and the process exits as a unit.
     let shared = state::shared();
+    if let Some(path) = kernel_path.as_ref().filter(|_| child.is_some()) {
+        // Remember the image this program just started: stopping it later uses
+        // this path first instead of re-guessing it.
+        state::write_kernel_target(&shared, Some(path.clone()));
+    }
     let app = Box::into_raw(Box::new(App::new(
         settings.clone(),
         shared,
@@ -85,6 +98,17 @@ fn main() {
         win::apply_dark_mode((*app).hwnd, settings.dark_menu);
         (*app).start(client);
         win::run_message_loop();
+    }
+}
+
+/// The two elevated-helper command lines `win::elevate` builds; every other
+/// command line belongs to the tray.
+fn run_kernel_helper() -> Option<i32> {
+    let args = mihomo::proc::own_command_line();
+    match args.get(1)?.as_str() {
+        mihomo::proc::KERNEL_START_SWITCH => Some(mihomo::proc::start_kernel_elevated(&args[2..])),
+        mihomo::proc::KERNEL_STOP_SWITCH => Some(mihomo::proc::stop_kernel_elevated(&args[2..])),
+        _ => None,
     }
 }
 

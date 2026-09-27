@@ -35,6 +35,11 @@ use crate::settings::DarkMenu;
 
 pub const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_REFRESH: u32 = WM_APP + 2;
+/// The worker replaced the kernel with an elevated one, so the child handle the
+/// UI thread holds belongs to a process that is gone.
+pub const WM_KERNEL_REPLACED: u32 = WM_APP + 3;
+/// The worker stopped the kernel and the tray should leave without doing more.
+pub const WM_EXIT: u32 = WM_APP + 4;
 const TRAY_ID: u32 = 1;
 
 /// Create the (never shown) window that owns the tray icon and receives menu
@@ -256,6 +261,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 0
             }
+            WM_KERNEL_REPLACED => {
+                (*app).forget_kernel();
+                0
+            }
+            WM_EXIT => {
+                (*app).shutdown();
+                0
+            }
             WM_DESTROY => {
                 // Idempotent, and the only place that is guaranteed to run for
                 // every teardown path (logoff, Explorer shutdown, `quit`).
@@ -310,7 +323,7 @@ fn show_context_menu(app: *mut App, x: i32, y: i32) {
         (*app).menu_open = true;
 
         let snapshot = crate::state::read(&(*app).state);
-        let mut menu = menu::Menu::build(&snapshot, &(*app).settings, (*app).admin);
+        let mut menu = menu::Menu::build(&snapshot, &(*app).settings);
         let hwnd = (*app).hwnd;
         let (x, y) = clamp_to_work_area(x, y);
 
