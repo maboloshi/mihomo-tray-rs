@@ -18,7 +18,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 | `系统代理` | 写/清 `HKCU\...\Internet Settings` 的 `ProxyEnable`/`ProxyServer`/`ProxyOverride`，并通知 WinINet 刷新 |
 | `代理模式 ▶` | `Rule` / `Global` / `Direct` 单选互斥（原生 radio 标记） |
 | `TUN 模式` | `PATCH /configs` 后**回读** `tun.enable` 确认；失败提示（多因未提权） |
-| `代理分组 ▶` | `GLOBAL` + 其余 Selector 组，每组一个子菜单；成员单选切换；只读组（URLTest/Fallback/LoadBalance）灰显当前值 |
+| `代理分组 ▶` | `GLOBAL` + 其余可切换组，每组一个子菜单；成员单选切换；只读组（`LoadBalance`/`Relay`）灰显当前值 |
 | `开机自启动` | HKCU Run 键增删 |
 | `重载配置` | `PUT /configs?force=true`，body `{"path":""}`（让 mihomo 重载它自己的配置文件） |
 | `退出 ▶` | `退出并停止 Mihomo`（只结束本程序掌控的进程）/ `仅退出程序` |
@@ -77,7 +77,8 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
             自动选择 ▶
                ● 荷兰-NL-2-HY2-流量倍率:0.5
                …
-            自动选择 (URLTest) ● 荷兰-NL-2-…      ← 只读组：灰显展示 now
+            自动选择 (URLTest) ● 荷兰-NL-2-…      ← 自动组：可点，点击即固定
+              自动（取消固定）                     ← 仅在该组已固定时出现
 ─────────────────────────────
 ✔ 开机自启动
 重载配置
@@ -91,7 +92,8 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
 
 - **命令 id 表**：每次构建菜单生成 `Vec<(u32, Target)>`，id 从 1000 递增（0 保留），`Target` 是 `Mode(..)` / `Tun` / `Group{group, member}` / `Reload` / `Exit(stop_kernel)`；菜单销毁即清空，不做文本反查。
 - **单选**：`MF_CHECKED | MFT_RADIOCHECK`。
-- **只读组**（`type` 为 `URLTest`/`Fallback`/`LoadBalance`/`Relay`）：整组不可点，项文本为 `名称 (类型) ● 当前值`。
+- **可切换组**：判据不是「`type` 是不是 `Selector`」而是「适配器是否实现 mihomo 的 `outboundgroup.SelectAble`」（`hub/route/proxies.go` 的 `updateProxy` 同此）。该集合恰好是 `Selector`/`URLTest`/`Fallback` 三种，`LoadBalance`/`Relay` 与普通节点会返回 `400 Must be a Selector`。非 `Selector` 的可切换组（自动组）项文本为 `名称 (类型)`，点击成员即 `PUT /proxies/{name}` 固定该节点；`/proxies` 的 `fixed` 非空时标签追加 `· 已固定`，并在成员列表顶部提供「自动（取消固定）」（`DELETE /proxies/{name}`）。
+- **只读组**（`LoadBalance` 等）：整组不可点，项文本为 `名称 (类型)`。
 - **组排序**：`/proxies` 是 Go map→JSON，顺序即字典序，mihomo 不提供配置顺序。故 `GLOBAL` 固定置顶，其余按不区分大小写字典序；`tray.yml` 的 `groups.order/include/exclude` 可覆盖。
 - **菜单在每次右键时重建**：先同步拉 `/configs`（+ `/proxies`）再建菜单，数据永远新鲜；不依赖轮询快照。
 
@@ -142,7 +144,8 @@ SetMenuInfo(hmenu, &mi);
 | 开关 TUN | `PATCH /configs` `{"tun":{"enable":true}}` | TUN 建立失败只写日志并把 enable 置 false，**HTTP 仍返回 204** → 必须回读确认；建 Wintun 需要管理员 |
 | 重载配置 | `PUT /configs?force=true`，body `{"path":""}` | **空 body 会 400**；不带 `force` 不重建 inbound；`path` 为空时 mihomo 回落到自己启动时的配置文件 |
 | 分组与节点 | `GET /proxies` | 顺序=字典序；`all` 非空的即分组；`history` 可能不存在（未测速） |
-| 切换节点 | `PUT /proxies/{urlencode(group)}` `{"name":"member"}` | 组名/成员名必须 percent-encode（中文必需）；非 Selector 返回 400 |
+| 切换节点 | `PUT /proxies/{urlencode(group)}` `{"name":"member"}` | 组名/成员名必须 percent-encode（中文必需）；仅 `Selector`/`URLTest`/`Fallback` 可写，其余返回 400 |
+| 取消固定 | `DELETE /proxies/{urlencode(group)}` | 只对非 `Selector` 的可写组有效（内核 `ForceSet("")`） |
 | （Phase 2）测速 | `GET /group/{name}/delay?timeout=3000&url=…` | 实测返回 `{"成员":延迟}`，并让 `/proxies` 出现 `history` |
 | （Phase 2）关闭连接 | `DELETE /connections` | |
 
@@ -238,7 +241,7 @@ ui:
 1. **当前项用 ✔ 而不是 ●**：模式与分组当前值统一用 `MF_CHECKED`（用户要求「当前节点打对钩」），因此不需要 `MFT_RADIOCHECK`。分组的当前值是嵌套子组时，**子菜单项本身也带 ✔**（`MF_POPUP | MF_CHECKED`）。
 2. **worker 先刷新再等待**：原实现先 `recv_timeout(poll)` 再刷新，导致首个菜单（3 s 前打开）显示空状态；现改为循环开头立刻刷新，实现中实测发现并修复。
 3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`，无资源文件、无图像库。
-4. **只读组标签带类型**：`自动选择 (URLTest)`，成员灰显且不可点，当前值仍打钩。
+4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
 5. **实测体积/内存**：exe 328 KB，空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
 6. **单测 19 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理。
 

@@ -26,6 +26,7 @@ pub enum Command {
         group: String,
         member: String,
     },
+    Unfix(String),
     Reload,
     /// Re-read everything (used after actions handled on the UI thread).
     Refresh,
@@ -136,6 +137,7 @@ impl App {
                 group: group.clone(),
                 member: member.clone(),
             }),
+            Action::Unfix(group) => self.send(Command::Unfix(group.clone())),
             Action::Reload => self.send(Command::Reload),
             Action::ToggleSysProxy => {
                 let snapshot = state::read(&self.state);
@@ -265,6 +267,7 @@ fn execute(client: &Client, command: &Command) -> Option<String> {
         Command::SetMode(mode) => client.set_mode(mode),
         Command::SetTun(enable) => client.set_tun(*enable),
         Command::Select { group, member } => client.select(group, member),
+        Command::Unfix(group) => client.unfix(group),
         Command::Reload => client.reload(),
         Command::Refresh => Ok(()),
     };

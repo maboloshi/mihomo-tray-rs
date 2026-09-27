@@ -214,9 +214,10 @@ impl Client {
             let kind = entry["type"].as_str().unwrap_or_default().to_string();
             groups.push(Group {
                 name: name.clone(),
-                switchable: kind == "Selector",
+                switchable: is_switchable(&kind),
                 kind,
                 now: entry["now"].as_str().unwrap_or_default().to_string(),
+                fixed: entry["fixed"].as_str().unwrap_or_default().to_string(),
                 members: members
                     .iter()
                     .filter_map(|m| m.as_str().map(str::to_string))
@@ -224,6 +225,13 @@ impl Client {
             });
         }
         Ok(groups)
+    }
+
+    /// Let a pinned `URLTest`/`Fallback` group choose for itself again
+    /// (`DELETE /proxies/{name}`). `Selector` groups have no pinned state.
+    pub fn unfix(&self, group: &str) -> Result<(), String> {
+        let path = format!("/proxies/{}", percent_encode(group));
+        self.body_of("DELETE", &path, None).map(|_| ())
     }
 
     pub fn set_mode(&self, mode: &str) -> Result<(), String> {
@@ -249,6 +257,14 @@ impl Client {
         self.body_of("PUT", "/configs?force=true", Some("{\"path\":\"\"}"))
             .map(|_| ())
     }
+}
+
+/// `/proxies` only exposes the adapter's type name, so mihomo's `SelectAble`
+/// set is mirrored here. It is exactly the set `updateProxy` accepts (see
+/// `hub/route/proxies.go`): `Selector`, `URLTest` and `Fallback`. `LoadBalance`
+/// and the plain node types answer `400 Must be a Selector`.
+fn is_switchable(kind: &str) -> bool {
+    matches!(kind, "Selector" | "URLTest" | "Fallback")
 }
 
 /// Percent-encode everything outside the RFC 3986 unreserved set (group names
@@ -439,6 +455,18 @@ mod tests {
     }
 
     #[test]
+    fn only_switchable_group_types_are_flagged_as_such() {
+        // Mirrors mihomo's `outboundgroup.SelectAble`: `updateProxy` accepts a
+        // PUT for these and answers `400 Must be a Selector` for the rest.
+        for kind in ["Selector", "URLTest", "Fallback"] {
+            assert!(is_switchable(kind), "{kind} accepts PUT /proxies/<name>");
+        }
+        for kind in ["LoadBalance", "Relay", "Direct", "Reject", ""] {
+            assert!(!is_switchable(kind), "{kind} must stay read-only");
+        }
+    }
+
+    #[test]
     fn proxies_returns_only_groups_and_respects_hidden() {
         let server = spawn_server(
             200,
@@ -447,14 +475,15 @@ mod tests {
                 "DIRECT":{"type":"Direct"},
                 "Hidden Group":{"type":"Selector","all":["DIRECT"],"now":"DIRECT","hidden":true},
                 "Auto":{"type":"Selector","all":["A","B"],"now":"B"},
-                "Fallback":{"type":"URLTest","all":["A","B"],"now":"A"}
+                "Fallback":{"type":"URLTest","all":["A","B"],"now":"A","fixed":"A"},
+                "Balanced":{"type":"LoadBalance","all":["A","B"]}
             }}"#,
         );
         let client = Client::new(&server.address(), "", 2000).unwrap();
         let groups = client.proxies().unwrap();
 
         // The plain node and the hidden group are dropped.
-        assert_eq!(groups.len(), 2);
+        assert_eq!(groups.len(), 3);
         assert!(groups.iter().all(|g| g.name != "DIRECT"));
         assert!(groups.iter().all(|g| g.name != "Hidden Group"));
 
@@ -465,22 +494,42 @@ mod tests {
         assert_eq!(auto.kind, "Selector");
         assert!(auto.switchable);
         assert_eq!(auto.now, "B");
+        assert!(auto.fixed.is_empty(), "a Selector has no pinned member");
         assert_eq!(auto.members, vec!["A".to_string(), "B".to_string()]);
 
+        // A URLTest group is selectable too; `fixed` says it is currently pinned.
         let fallback = groups
             .iter()
             .find(|g| g.name == "Fallback")
             .expect("Fallback group");
         assert_eq!(fallback.kind, "URLTest");
-        assert!(!fallback.switchable);
+        assert!(fallback.switchable);
         assert_eq!(fallback.now, "A");
+        assert_eq!(fallback.fixed, "A");
         assert_eq!(fallback.members, vec!["A".to_string(), "B".to_string()]);
+
+        let balanced = groups
+            .iter()
+            .find(|g| g.name == "Balanced")
+            .expect("Balanced group");
+        assert!(!balanced.switchable);
 
         let sent = server.request();
         assert_eq!(
             (sent.method.as_str(), sent.path.as_str()),
             ("GET", "/proxies")
         );
+    }
+
+    #[test]
+    fn unfix_deletes_the_encoded_group() {
+        let server = spawn_server(204, "No Content", "");
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        client.unfix("自动选择").unwrap();
+
+        let sent = server.request();
+        assert_eq!(sent.method, "DELETE");
+        assert_eq!(sent.path, "/proxies/%E8%87%AA%E5%8A%A8%E9%80%89%E6%8B%A9");
     }
 
     #[test]

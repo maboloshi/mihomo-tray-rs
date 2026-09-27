@@ -18,7 +18,12 @@ pub enum Action {
     ToggleSysProxy,
     SetMode(String),
     ToggleTun,
-    Select { group: String, member: String },
+    Select {
+        group: String,
+        member: String,
+    },
+    /// Return a pinned `URLTest`/`Fallback` group to automatic selection.
+    Unfix(String),
     ToggleAutostart,
     Reload,
     RestartAsAdmin,
@@ -186,6 +191,18 @@ fn add_members(
     path: &mut Vec<String>,
     settings: &Settings,
 ) {
+    // A pinned URLTest/Fallback stops choosing for itself, so the way back to
+    // automatic selection has to be offered explicitly.
+    if !group.fixed.is_empty() && !builder.out_of_budget() {
+        builder.checked(
+            menu,
+            "自动（取消固定）",
+            Action::Unfix(group.name.clone()),
+            false,
+            true,
+        );
+        builder.separator(menu);
+    }
     let page_size = settings.groups_page_size;
     if page_size > 0 && group.members.len() > page_size && depth == 0 {
         for (index, chunk) in group.members.chunks(page_size).enumerate() {
@@ -343,13 +360,19 @@ impl Builder {
     }
 }
 
-/// Read-only groups are labelled with their type, so it is obvious why their
-/// members cannot be picked.
+/// Groups that are not plain selectors carry their type, so it is obvious why
+/// their members behave the way they do. A pinned automatic group additionally
+/// says so, because pinning stops the health check without changing anything
+/// else about the group.
 fn group_label(group: &Group) -> String {
-    if group.switchable {
-        menu_text(&group.name)
+    let name = menu_text(&group.name);
+    if group.switchable && group.kind == "Selector" {
+        return name;
+    }
+    if group.fixed.is_empty() {
+        format!("{name} ({})", group.kind)
     } else {
-        format!("{} ({})", menu_text(&group.name), group.kind)
+        format!("{name} ({} · 已固定)", group.kind)
     }
 }
 
@@ -392,6 +415,7 @@ mod tests {
             kind: if switchable { "Selector" } else { "URLTest" }.to_string(),
             switchable,
             now: now.to_string(),
+            fixed: String::new(),
             members: members.iter().map(|m| m.to_string()).collect(),
         }
     }
@@ -517,6 +541,45 @@ mod tests {
                     state & MF_GRAYED != 0,
                     "members of a read-only group must be grayed"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn pinned_auto_groups_are_switchable_and_offer_unpin() {
+        let mut auto = group("Auto", true, "A", &["A", "B"]);
+        auto.kind = "URLTest".to_string();
+        auto.fixed = "A".to_string();
+        let menu = Menu::build(&snapshot(vec![auto]), &Settings::default(), true);
+        let groups = find_submenu(menu.handle, "代理分组");
+        assert_eq!(labels(groups), vec!["Auto (URLTest · 已固定)"]);
+
+        let auto = find_submenu(groups, "Auto (URLTest · 已固定)");
+        assert!(!auto.is_null());
+        assert_eq!(label_at(auto, 0), "自动（取消固定）");
+
+        for (index, action) in menu.actions.iter().enumerate() {
+            let id = ID_BASE + index;
+            match action {
+                Action::Unfix(group) => {
+                    assert_eq!(group, "Auto");
+                    assert_eq!(label(auto, id), "自动（取消固定）");
+                }
+                Action::Select { group, member } => {
+                    assert_eq!(group, "Auto");
+                    let state = unsafe { GetMenuState(auto, id as u32, MF_BYCOMMAND) };
+                    assert_eq!(
+                        state & MF_GRAYED,
+                        0,
+                        "{member} of a URLTest group must be selectable"
+                    );
+                    assert_eq!(
+                        state & MF_CHECKED != 0,
+                        member == "A",
+                        "{member} check state"
+                    );
+                }
+                _ => {}
             }
         }
     }

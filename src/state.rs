@@ -6,9 +6,14 @@ use std::sync::{Arc, Mutex};
 pub struct Group {
     pub name: String,
     pub kind: String,
-    /// Only `Selector` groups can be switched.
+    /// Only the group types whose adapter implements mihomo's `SelectAble` can
+    /// be switched: `Selector`, `URLTest` and `Fallback`.
     pub switchable: bool,
     pub now: String,
+    /// `/proxies` `fixed`: the member a `URLTest`/`Fallback` group was pinned
+    /// to, empty while the group keeps choosing for itself. `Selector` groups
+    /// never report it.
+    pub fixed: String,
     pub members: Vec<String>,
 }
 

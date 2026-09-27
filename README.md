@@ -11,7 +11,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 - **系统代理** — 写 `HKCU\...\Internet Settings` 并通知 WinINet 刷新（只写注册表不会即时生效）
 - **代理模式** — Rule / Global / Direct 单选互斥，勾选当前值
 - **TUN 模式** — 切换后回读 `tun.enable` 确认（失败通常是缺少管理员权限）
-- **代理分组** — `GLOBAL` 与其余 Selector 组，逐层子菜单；成员打钩表示当前节点；URLTest/Fallback 等只读组灰显但展示当前值
+- **代理分组** — `GLOBAL` 与其余可切换组，逐层子菜单；成员打钩表示当前节点。`Selector`、`URLTest`、`Fallback` 的成员都可点（后两者的点击等于手动固定节点，菜单会多出「自动（取消固定）」）；`LoadBalance` 等真正只读的组灰显但展示当前值
 - **开机自启动** — HKCU `Run` 键，不触发 UAC
 - **重载配置** — `PUT /configs?force=true`，让内核重载它自己那份配置（本程序无需知道 yml 路径）
 - **退出** — 「退出并停止 Mihomo」（只结束本程序掌控的实例）/「仅退出程序」
@@ -83,7 +83,8 @@ ui:
 - **TUN 失败不会返回 HTTP 错误**（内核只记日志并把 `enable` 置 false），因此本程序以回读 `GET /configs` 的结果为准；创建 Wintun 适配器需要管理员权限，菜单提供「以管理员身份重启」。
 - **系统代理与 TUN 都不由 mihomo 核心管理**，`Internet Settings` 与监听端口分别由本程序处理；`mixed-port` 从控制器实时读取，不解析 yml。
 - 长列表由系统滚动箭头 + 鼠标滚轮 + 方向键处理（构建菜单时设置了 `MIM_MAXHEIGHT`，这也是官方建议的做法——默认以屏幕高度为上限在多显示器下会失效）。
-- 只读组（URLTest/Fallback/LoadBalance）的成员不可点击，仅展示当前值。
+- 只读组（`LoadBalance` 与普通节点）的成员不可点击，仅展示当前值。
+- `URLTest`/`Fallback` 组被点选后会进入「已固定」状态（组名带 `· 已固定`），此时内核不再自动测速换节点；用组内的「自动（取消固定）」（`DELETE /proxies/{name}`）恢复自动选择。固定状态由内核写进它自己的缓存，重载配置也会清除。
 - Windows 11 默认把新的托盘图标收进溢出区，首次运行需要手动把它拖到任务栏固定。
 - 本程序默认以普通权限运行；TUN 需要管理员权限，失败时菜单提供「以管理员身份重启」。
 
