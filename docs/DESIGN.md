@@ -262,7 +262,8 @@ ui:
 | 互相引用的分组导致嵌套展开 ~G⁴，右键卡死 UI 线程 | `MAX_ITEMS = 1500` 全局项数预算，超限追加灰显「项目过多，已省略」并停止递归 |
 | 重入守卫在 `dispatch` 之前清除，理论上可重入产生别名 `&mut App` | 守卫覆盖整个 `dispatch`（`ShellExecuteW`/`InternetSetOptionW` 会泵消息） |
 | 「退出并停止 Mihomo」可能杀掉非本程序启动的实例 | 失败关闭：路径未知或 `OpenProcess` 被拒时不终止，并提示「无法确认归属」 |
-| 提权副本重启内核后，托盘仍持有旧内核的 `Child` 句柄，「退出并停止」会以为已经停掉 | 提权成功后 worker 用 `WM_KERNEL_REPLACED` 让 UI 线程 `forget_kernel()`，回到按路径匹配 |
+| 提权副本重启内核后，托盘仍持有旧内核的 `Child` 句柄，「退出并停止」会以为已经停掉 | 句柄只在 `try_wait()` 仍是 `Ok(None)`（进程还活着）时才算证据；内核身份改由「副本回传的 PID → 归一化路径 → 唯一不可读的那个」判定，不再维护句柄作废消息 |
+| 提权后的内核停不掉：托盘"成功退出"、提权 `mihomo.exe` 仍在 | 根因是路径比较：`current\mihomo.exe` 与进程报告的 `1.19.31\mihomo.exe` 永不相等（junction 在 CreateProcess 时被解析），旧代码因此落到"旧句柄兜底"或当作已停止。改为 `same_image` 归一化比较 + `denied ⇒ NeedsAdmin` + 副本按家族停止 |
 | `szTip` 可能无 NUL 终止 | 按 UTF-16 单元截断到 127 并留终止位 |
 | `mixed-port` 无检查强转 `u16`（70000 → 4464 并写进系统代理） | 越界过滤为 0 |
 | `CreateDIBSection` 部分失败时泄漏 `HBITMAP`；AND mask 未初始化 | 失败路径释放，mask 传零填充缓冲 |

@@ -87,12 +87,6 @@ impl App {
         self.kernel = Some(child);
     }
 
-    /// The kernel was replaced by the elevated helper, so the child handle is
-    /// stale: from now on the kernel is only ever matched by path.
-    pub fn forget_kernel(&mut self) {
-        self.kernel = None;
-    }
-
     /// Create the worker and register the tray icon; call once the window exists.
     pub fn start(&mut self, client: Client) {
         match spawn_worker(
@@ -222,12 +216,10 @@ impl App {
             // The kernel it replaced is gone: the recorded PID is stale.
             state::write_kernel_pid(&self.state, None);
         }
-        // The recorded target wins: it is the image path this program actually
-        // started or replaced, while the discovered path is only a guess.
-        let target = state::read(&self.state)
-            .kernel_target
-            .or_else(|| self.kernel_path.clone());
-        if let Some(path) = &target {
+        // The discovered path is the only path this program knows: the kernel it
+        // started itself came from it, and `find_kernel` prefers a real binary over
+        // a scoop shim.
+        if let Some(path) = &self.kernel_path {
             match proc::stop_kernel(None, path) {
                 Err(error) => return StopResult::Refused(error),
                 Ok(outcome) if outcome.denied > 0 => return StopResult::NeedsAdmin,
@@ -342,7 +334,7 @@ fn set_tun(worker: &Worker, enable: bool) -> Option<String> {
     if read_tun(worker.client) == Some(true) {
         return None;
     }
-    let Some(pid) = start_target(worker) else {
+    let Some(pid) = our_kernel(worker) else {
         return Some(i18n::t().error_no_kernel_path.to_string());
     };
     let params = win::elevate::kernel_start_params(pid);
@@ -352,11 +344,6 @@ fn set_tun(worker: &Worker, enable: bool) -> Option<String> {
     show_note(worker, Some(i18n::t().status_elevating_kernel.to_string()));
     let elevated = win::elevate::run_self_elevated(&params);
     show_note(worker, None);
-    // The prompt was cancelled, or it timed out while the helper was still
-    // working: in the second case the kernel may already have been replaced, so
-    // the child handle the UI thread holds is not worth keeping. From here on the
-    // kernel is known by the PID the helper reports, or by path.
-    forget_child(worker);
     let code = match elevated {
         Ok(code) => code,
         Err(error) => return Some(error),
@@ -387,7 +374,7 @@ fn read_tun(client: &Client) -> Option<bool> {
 /// Ask for the rights to stop the kernel, and tell the UI thread to leave once it
 /// is gone. The UAC prompt blocks this thread, exactly like the TUN restart.
 fn stop_kernel_elevated(worker: &Worker) -> Option<String> {
-    let Some(pid) = stop_target(worker) else {
+    let Some(pid) = our_kernel(worker) else {
         return Some(i18n::t().error_no_kernel_path.to_string());
     };
     let params = win::elevate::kernel_stop_params(pid);
@@ -422,36 +409,27 @@ fn helper_failure(code: i32) -> String {
     }
 }
 
-/// What a caller needs the kernel for.
-#[derive(Clone, Copy)]
-enum KernelUse {
-    /// Replace it with an elevated one.
-    Restart,
-    /// End it.
-    Stop,
-}
-
-/// Which of the running kernels a caller means.
+/// The kernel this program is responsible for, out of everything that is running.
 ///
-/// The kernel this program replaced is known by PID, and that answer is used
-/// first: an elevated process's image path cannot be read from here, so the PID
-/// is the only identity the tray holds. Everything after it is a fallback for a
-/// kernel that was started by somebody else:
+/// One answer, two purposes (replacing it for TUN, ending it): the identity is the
+/// same either way, and a wrong answer would be equally wrong for both.
 ///
-/// * path identity is resolved through `proc::same_image`, so a scoop junction and
-///   the versioned directory it points at count as the same kernel;
-/// * a *readable* kernel with a different image is never guessed at: for a
-///   restart, replacing somebody else's kernel is worse than reporting that ours
-///   was not found, and for a stop that kernel is provably not ours — while one
-///   whose image cannot be read at all still might be;
-/// * a launcher is never preferred either: scoop's shim is called `mihomo.exe`
-///   too, and handing over its PID would replace the shim instead of the kernel
-///   under it.
+/// * the PID the elevated helper reported comes first — an elevated process's
+///   image path cannot be read from here, so a PID is the only identity the tray
+///   holds — and a PID that is no longer in the process list is stale;
+/// * then the path this program knows, compared through `proc::same_image` so a
+///   scoop junction and the versioned directory it points at count as one kernel,
+///   and preferring a real binary over the shim that carries the same name;
+/// * then a kernel whose image cannot be read at all, which is what an elevated
+///   kernel replaced by an earlier TUN enable looks like after a tray restart.
+///
+/// A *readable* kernel with a different image is somebody else's and is never
+/// guessed at: replacing or ending it would be worse than reporting that ours was
+/// not found.
 fn pick_kernel(
     running: &[proc::Process],
     recorded: Option<u32>,
     known: Option<&Path>,
-    use_for: KernelUse,
 ) -> Option<u32> {
     let matches = |path: &Path, skip_shims: bool| {
         running
@@ -463,53 +441,24 @@ fn pick_kernel(
             })
             .map(|process| process.pid)
     };
-    // A PID that is no longer in the process list is stale: it was reused or the
-    // kernel is gone, and neither may be acted on.
     recorded
         .filter(|pid| running.iter().any(|process| process.pid == *pid))
         .or_else(|| known.and_then(|path| matches(path, true).or_else(|| matches(path, false))))
-        .or_else(|| match use_for {
-            // One kernel and nothing recorded: it is the only candidate there is.
-            KernelUse::Restart => (running.len() == 1).then(|| running[0].pid),
-            // Never a readable stranger; an unreadable one might be ours.
-            KernelUse::Stop => running.iter().find(|p| p.denied).map(|p| p.pid),
+        .or_else(|| {
+            running
+                .iter()
+                .find(|process| process.denied)
+                .map(|process| process.pid)
         })
 }
 
-/// The kernel the TUN restart is about.
-fn start_target(worker: &Worker) -> Option<u32> {
-    let snapshot = state::read(worker.state);
-    let known = snapshot
-        .kernel_target
-        .or_else(|| worker.kernel_path.map(Path::to_path_buf));
+/// The kernel this program is responsible for right now.
+fn our_kernel(worker: &Worker) -> Option<u32> {
     pick_kernel(
         &proc::list_mihomo(),
-        snapshot.kernel_pid,
-        known.as_deref(),
-        KernelUse::Restart,
+        state::read(worker.state).kernel_pid,
+        worker.kernel_path,
     )
-}
-
-/// The kernel "exit and stop mihomo" is about.
-fn stop_target(worker: &Worker) -> Option<u32> {
-    let snapshot = state::read(worker.state);
-    let known = snapshot
-        .kernel_target
-        .or_else(|| worker.kernel_path.map(Path::to_path_buf));
-    pick_kernel(
-        &proc::list_mihomo(),
-        snapshot.kernel_pid,
-        known.as_deref(),
-        KernelUse::Stop,
-    )
-}
-
-/// The child handle is only worth anything while the process this program started
-/// is still the one running: an elevated helper replaces it.
-fn forget_child(worker: &Worker) {
-    unsafe {
-        PostMessageW(worker.hwnd as HWND, win::WM_KERNEL_REPLACED, 0, 0);
-    }
 }
 
 /// Wait, bounded, for a kernel that was just restarted to answer again.
@@ -545,7 +494,6 @@ fn refresh(client: &Client, shared: &Shared, version: &mut String, outcome: Outc
         autostart: win::autostart::is_enabled(),
         action_error: previous.action_error,
         status_note: previous.status_note,
-        kernel_target: previous.kernel_target,
         kernel_pid: previous.kernel_pid,
         ..Default::default()
     };
@@ -636,55 +584,28 @@ mod tests {
     const SHIM: &str = r"D:\App\Scoop\shims\mihomo.exe";
 
     #[test]
-    fn a_readable_stranger_is_never_handed_to_the_helper() {
+    fn the_kernel_is_picked_by_pid_then_by_path_then_by_being_unreadable() {
         let running = vec![process(1, KERNEL, false), process(2, STRANGER, false)];
         let ours = Some(Path::new(KERNEL));
-        assert_eq!(
-            pick_kernel(&running, None, ours, KernelUse::Restart),
-            Some(1)
-        );
-        assert_eq!(pick_kernel(&running, None, ours, KernelUse::Stop), Some(1));
+        assert_eq!(pick_kernel(&running, None, ours), Some(1));
 
-        // Nothing of ours is running: the stranger must not be touched, and there
-        // is no third candidate to fall back to either.
+        // Nothing of ours is running: a readable stranger is never picked, not
+        // even when it is the only kernel there is.
         let elsewhere = Some(Path::new(r"C:\nowhere\mihomo.exe"));
-        assert_eq!(
-            pick_kernel(&running, None, elsewhere, KernelUse::Stop),
-            None
-        );
-        assert_eq!(
-            pick_kernel(&running, None, elsewhere, KernelUse::Restart),
-            None
-        );
-
-        // An unreadable kernel might still be ours, so a stop may fall back to it
-        // — and for a restart it is the only kernel there is, which is enough to
-        // work with: the helper reads its image and decides.
-        let unreadable = vec![process(3, "", true)];
-        assert_eq!(
-            pick_kernel(&unreadable, None, elsewhere, KernelUse::Stop),
-            Some(3)
-        );
-        assert_eq!(
-            pick_kernel(&unreadable, None, elsewhere, KernelUse::Restart),
-            Some(3)
-        );
-
-        // One kernel and nothing recorded: for a restart it is the only candidate.
+        assert_eq!(pick_kernel(&running, None, elsewhere), None);
         let single = vec![process(4, STRANGER, false)];
-        assert_eq!(
-            pick_kernel(&single, None, None, KernelUse::Restart),
-            Some(4)
-        );
-        assert_eq!(pick_kernel(&single, None, None, KernelUse::Stop), None);
+        assert_eq!(pick_kernel(&single, None, elsewhere), None);
+        assert_eq!(pick_kernel(&single, None, None), None);
 
-        // A launcher is used when it is what this program recorded, but a real
-        // kernel with the same name wins while both are running.
+        // A kernel whose image cannot be read might be ours: that is what an
+        // elevated one replaced by TUN looks like after a tray restart.
+        let unreadable = vec![process(3, "", true)];
+        assert_eq!(pick_kernel(&unreadable, None, elsewhere), Some(3));
+        assert_eq!(pick_kernel(&unreadable, None, None), Some(3));
+
+        // A launcher is used when the real kernel under it is not running.
         let launcher = vec![process(5, SHIM, false), process(6, STRANGER, false)];
-        assert_eq!(
-            pick_kernel(&launcher, None, Some(Path::new(SHIM)), KernelUse::Restart),
-            Some(5)
-        );
+        assert_eq!(pick_kernel(&launcher, None, Some(Path::new(SHIM))), Some(5));
     }
 
     #[test]
@@ -693,22 +614,9 @@ mod tests {
         let ours = Some(Path::new(KERNEL));
         // The PID the helper reported is the kernel this program owns, even when
         // its image path points somewhere else entirely.
-        assert_eq!(
-            pick_kernel(&running, Some(2), ours, KernelUse::Stop),
-            Some(2)
-        );
-        assert_eq!(
-            pick_kernel(&running, Some(2), ours, KernelUse::Restart),
-            Some(2)
-        );
+        assert_eq!(pick_kernel(&running, Some(2), ours), Some(2));
         // A PID that is no longer running is stale and must be ignored.
-        assert_eq!(
-            pick_kernel(&running, Some(99), ours, KernelUse::Stop),
-            Some(1)
-        );
-        assert_eq!(
-            pick_kernel(&running, Some(99), ours, KernelUse::Stop),
-            Some(1)
-        );
+        assert_eq!(pick_kernel(&running, Some(99), ours), Some(1));
+        assert_eq!(pick_kernel(&running, Some(0), ours), Some(1));
     }
 }

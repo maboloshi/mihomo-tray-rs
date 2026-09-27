@@ -1,6 +1,5 @@
 //! Shared runtime state. The worker thread writes, the UI thread reads.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Default)]
@@ -42,10 +41,6 @@ pub struct Snapshot {
     /// Controller reachability, owned by the refresh loop: set when the
     /// controller stops answering and cleared as soon as it is back.
     pub controller_error: Option<String>,
-    /// The exact image path of the kernel this program started or replaced last.
-    /// Stopping uses it first, because that is the only path that is certainly
-    /// the kernel's own — the discovered path is a fallback.
-    pub kernel_target: Option<PathBuf>,
     /// The kernel the elevated helper started, as reported through its exit code.
     /// An elevated process's image path cannot be read from here, so a PID is the
     /// only identity the tray can hold on to.
@@ -123,15 +118,6 @@ pub fn write_status_note(state: &Shared, note: Option<String>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .status_note = note;
-}
-
-/// Remember which kernel image this program started or replaced, so stopping it
-/// does not have to guess between the configured and the running path.
-pub fn write_kernel_target(state: &Shared, path: Option<PathBuf>) {
-    state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .kernel_target = path;
 }
 
 /// Remember the kernel the elevated helper started, by PID: after a replacement

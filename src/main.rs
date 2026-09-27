@@ -72,11 +72,6 @@ fn main() {
     // `App` deliberately lives for the whole process: the window procedure holds
     // a raw pointer to it, and the process exits as a unit.
     let shared = state::shared();
-    if let Some(path) = kernel_path.as_ref().filter(|_| child.is_some()) {
-        // Remember the image this program just started: stopping it later uses
-        // this path first instead of re-guessing it.
-        state::write_kernel_target(&shared, Some(path.clone()));
-    }
     let app = Box::into_raw(Box::new(App::new(
         settings.clone(),
         shared,

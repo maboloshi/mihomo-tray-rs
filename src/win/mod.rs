@@ -35,11 +35,8 @@ use crate::settings::DarkMenu;
 
 pub const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_REFRESH: u32 = WM_APP + 2;
-/// The worker replaced the kernel with an elevated one, so the child handle the
-/// UI thread holds belongs to a process that is gone.
-pub const WM_KERNEL_REPLACED: u32 = WM_APP + 3;
 /// The worker stopped the kernel and the tray should leave without doing more.
-pub const WM_EXIT: u32 = WM_APP + 4;
+pub const WM_EXIT: u32 = WM_APP + 3;
 const TRAY_ID: u32 = 1;
 
 /// Create the (never shown) window that owns the tray icon and receives menu
@@ -259,10 +256,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if !(*app).menu_open {
                     (*app).refresh_ui();
                 }
-                0
-            }
-            WM_KERNEL_REPLACED => {
-                (*app).forget_kernel();
                 0
             }
             WM_EXIT => {
