@@ -12,6 +12,11 @@ use windows_sys::Win32::Networking::WinHttp::{
 use crate::i18n;
 use crate::state::Group;
 
+/// How long a liveness probe gets. Probing is not a request: a local controller
+/// answers in milliseconds, and a machine where a refused loopback connection
+/// takes seconds to come back must not turn every candidate into a stall.
+const PROBE_TIMEOUT_MS: u32 = 800;
+
 #[derive(Clone, Debug)]
 pub struct Client {
     pub host: String,
@@ -178,8 +183,17 @@ impl Client {
     // --- endpoints -------------------------------------------------------
 
     /// `GET /` — the cheapest liveness probe.
+    ///
+    /// It asks its own short question rather than using the timeout real requests
+    /// get: a local controller answers in milliseconds, while an address that
+    /// accepts a connection and then stalls — or that takes its time to refuse —
+    /// must not cost a caller that is waiting for a kernel its request timeout.
     pub fn alive(&self) -> bool {
-        matches!(self.http("GET", "/", None), Ok((200, text)) if text.contains("mihomo"))
+        let probe = Client {
+            timeout_ms: self.timeout_ms.min(PROBE_TIMEOUT_MS),
+            ..self.clone()
+        };
+        matches!(probe.http("GET", "/", None), Ok((200, text)) if text.contains("mihomo"))
     }
 
     pub fn version(&self) -> Result<String, String> {

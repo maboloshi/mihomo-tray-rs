@@ -239,10 +239,6 @@ const KERNEL_START_BUDGET: Duration = Duration::from_secs(10);
 /// How long a kernel this program started gets to answer the controller.
 const KERNEL_STARTUP_BUDGET: Duration = Duration::from_secs(5);
 
-/// Per-probe timeout while waiting, so the loop cannot stall for the full
-/// configured controller timeout on every iteration.
-const KERNEL_PROBE_TIMEOUT_MS: u32 = 500;
-
 /// Everything an action needs besides the command itself.
 struct Worker<'a> {
     client: &'a Client,
@@ -574,17 +570,14 @@ fn wait_for_kernel(client: &Client) {
 
 /// Wait, bounded, for a kernel this program just started to answer.
 ///
-/// The kernel is probed where its own configuration says it listens — the client
-/// that was discovered — with a short per-probe timeout, so a controller that is
-/// not up yet cannot make a single iteration take the configured timeout.
+/// Returns whether it answered within the budget. The kernel is probed where its
+/// own configuration says it listens — the client that was discovered — with
+/// `Client::alive` asking its own short question, so one iteration cannot take
+/// the configured request timeout while the kernel is still coming up.
 fn wait_for_controller(client: &Client) -> bool {
-    let probe = Client {
-        timeout_ms: KERNEL_PROBE_TIMEOUT_MS,
-        ..client.clone()
-    };
     let deadline = std::time::Instant::now() + KERNEL_STARTUP_BUDGET;
     while std::time::Instant::now() < deadline {
-        if probe.alive() {
+        if client.alive() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(100));

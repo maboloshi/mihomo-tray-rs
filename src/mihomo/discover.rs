@@ -219,16 +219,39 @@ pub fn find_controller(settings: &Settings) -> Option<Client> {
         }
     }
 
-    for port in DEFAULT_PORTS {
-        if let Some(client) = Client::new(
-            &format!("127.0.0.1:{port}"),
-            env_secret.as_deref().unwrap_or(""),
-            settings.controller_timeout_ms.min(1000),
-        ) {
-            if client.alive() {
-                return Some(client);
-            }
-        }
+    // Every candidate is probed at once, and the answers are read back in the
+    // order the ports are listed in: probing them one after another means a port
+    // that accepts a connection and then stalls — or one that takes seconds to
+    // refuse — delays the kernel this program is about to start by its whole
+    // timeout, for nothing.
+    let secret = env_secret.as_deref().unwrap_or("");
+    let candidates: Vec<Client> = DEFAULT_PORTS
+        .iter()
+        .filter_map(|port| {
+            Client::new(
+                &format!("127.0.0.1:{port}"),
+                secret,
+                settings.controller_timeout_ms.min(1000),
+            )
+        })
+        .collect();
+    let answered = std::thread::scope(|scope| {
+        let probes: Vec<_> = candidates
+            .iter()
+            .map(|client| scope.spawn(|| client.alive()))
+            .collect();
+        probes
+            .into_iter()
+            .map(|probe| probe.join().unwrap_or(false))
+            .collect::<Vec<bool>>()
+    });
+    if let Some(client) = candidates
+        .iter()
+        .zip(answered)
+        .find(|(_, alive)| *alive)
+        .map(|(client, _)| client)
+    {
+        return Some(client.clone());
     }
 
     // Nothing answered: fall back to the first configured candidate so the UI can
