@@ -1,5 +1,7 @@
 //! Shared runtime state. The worker thread writes, the UI thread reads.
 
+use std::path::PathBuf;
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Default)]
@@ -128,4 +130,62 @@ pub fn write_kernel_pid(state: &Shared, pid: Option<u32>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .kernel_pid = pid;
+}
+
+/// The kernel was started here and has not answered the controller yet: the
+/// status line says so and `note` explains the wait. The first real refresh
+/// replaces all of it.
+pub fn write_kernel_started(state: &Shared, note: String) {
+    let mut snapshot = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    snapshot.kernel_running = true;
+    snapshot.status_note = Some(note);
+}
+
+/// The kernel this program may start or replace: where it was found, and the
+/// handle of the instance this program launched itself.
+///
+/// The worker fills it while it brings the kernel up, and reads the path back for
+/// the actions that must know which kernel is ours; the UI thread reads the path
+/// and claims the handle when the user asks to exit and stop mihomo. It cannot
+/// live in `Snapshot`, which is cloned on every read.
+#[derive(Debug, Default)]
+pub struct Kernel {
+    path: Option<PathBuf>,
+    child: Option<Child>,
+}
+
+pub type KernelSlot = Arc<Mutex<Kernel>>;
+
+pub fn kernel_slot() -> KernelSlot {
+    Arc::new(Mutex::new(Kernel::default()))
+}
+
+/// A poisoned lock still holds the kernel this program knows about, which is
+/// strictly better than pretending nothing was started.
+fn lock(slot: &KernelSlot) -> std::sync::MutexGuard<'_, Kernel> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Record where the kernel was found, before anything is started: the exit path
+/// matches the kernel it may stop against this path, including a kernel this
+/// program did not start.
+pub fn write_kernel_path(slot: &KernelSlot, path: Option<PathBuf>) {
+    lock(slot).path = path;
+}
+
+/// Record the handle of the kernel this program launched.
+pub fn write_kernel_child(slot: &KernelSlot, child: Child) {
+    lock(slot).child = Some(child);
+}
+
+/// Where the kernel was found.
+pub fn kernel_path(slot: &KernelSlot) -> Option<PathBuf> {
+    lock(slot).path.clone()
+}
+
+/// Claim the handle of the kernel this program launched.
+pub fn take_kernel_child(slot: &KernelSlot) -> Option<Child> {
+    lock(slot).child.take()
 }

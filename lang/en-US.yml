@@ -39,6 +39,9 @@ status:
   running: "Mihomo status: running ({mode})"
   controller_unreachable: "Mihomo status: kernel running, controller unreachable"
   stopped: "Mihomo status: not running"
+  looking_kernel: "Looking for the kernel…"
+  starting_kernel: "Starting the kernel…"
+  kernel_silent: "The kernel has not answered yet; still waiting"
   elevating_kernel: "Restarting the kernel as administrator…"
   elevating_stop: "Stopping the kernel as administrator…"
 

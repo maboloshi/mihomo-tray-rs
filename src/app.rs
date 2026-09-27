@@ -4,8 +4,8 @@
 //! posts commands to the worker, which refreshes the snapshot and pokes the UI
 //! window when it is done.
 
-use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::path::Path;
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 
@@ -14,9 +14,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::i18n;
 use crate::icon::Icons;
-use crate::mihomo::{Client, proc};
+use crate::mihomo::{Client, discover, proc};
 use crate::settings::Settings;
-use crate::state::{self, Shared, Snapshot};
+use crate::state::{self, KernelSlot, Shared, Snapshot};
 use crate::win::{self, menu::Action};
 
 #[derive(Debug, Clone)]
@@ -51,10 +51,10 @@ pub struct App {
     pub hwnd: HWND,
     pub icons: Icons,
     pub menu_open: bool,
-    pub kernel_path: Option<PathBuf>,
-    /// The kernel this program started itself, so "exit and stop mihomo" can end
-    /// it directly. Cleared once an elevated helper takes the kernel over.
-    kernel: Option<Child>,
+    /// The kernel this program may start or replace, as the worker found it: the
+    /// path is what "exit and stop mihomo" matches against, and the handle is the
+    /// instance this program launched itself.
+    kernel: KernelSlot,
     tx: Option<Sender<Command>>,
     fatal: Option<String>,
     /// `NIM_ADD` can fail before the shell is ready (e.g. at logon), so keep
@@ -63,49 +63,38 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
-        settings: Settings,
-        state: Shared,
-        kernel_path: Option<PathBuf>,
-        fatal: Option<String>,
-    ) -> Self {
+    pub fn new(settings: Settings, state: Shared, fatal: Option<String>) -> Self {
         Self {
             settings,
             state,
             hwnd: std::ptr::null_mut(),
             icons: Icons::new(),
             menu_open: false,
-            kernel_path,
-            kernel: None,
+            kernel: state::kernel_slot(),
             tx: None,
             fatal,
             icon_ready: false,
         }
     }
 
-    pub fn set_kernel(&mut self, child: Child) {
-        self.kernel = Some(child);
-    }
-
-    /// Create the worker and register the tray icon; call once the window exists.
-    pub fn start(&mut self, client: Client) {
+    /// Register the tray icon and start the worker; call once the window exists.
+    ///
+    /// The icon is the thing the user waits for, so it comes first and nothing
+    /// about the kernel runs on this thread: finding the kernel, starting it and
+    /// waiting for it to answer are the worker's first job. The status note the
+    /// worker publishes is what the tooltip and the menu show while that happens.
+    pub fn start(&mut self) {
+        self.refresh_ui();
         match spawn_worker(
-            client,
             self.state.clone(),
             self.hwnd as isize,
             self.settings.clone(),
-            self.kernel_path.clone(),
+            Arc::clone(&self.kernel),
             self.fatal.take(),
         ) {
             Ok(tx) => self.tx = Some(tx),
             Err(error) => self.set_error(error),
         }
-        let snapshot = state::read(&self.state);
-        self.icon_ready = win::add_icon(
-            self.hwnd,
-            self.icons.for_state(snapshot.tun, self.proxying(&snapshot)),
-            &tooltip(&snapshot),
-        );
     }
 
     fn proxying(&self, snapshot: &Snapshot) -> bool {
@@ -135,9 +124,7 @@ impl App {
 
     pub fn set_error(&self, message: impl Into<String>) {
         state::write_action_error(&self.state, message.into());
-        unsafe {
-            PostMessageW(self.hwnd, win::WM_REFRESH, 0, 0);
-        }
+        post(self.hwnd as isize, win::WM_REFRESH);
     }
 
     pub fn dispatch(&mut self, action: &Action) {
@@ -204,7 +191,7 @@ impl App {
     /// A kernel whose image is readable and different is somebody else's, and is
     /// left alone rather than dragged into an elevation prompt.
     fn stop_kernel(&mut self) -> StopResult {
-        let child = self.kernel.take();
+        let child = state::take_kernel_child(&self.kernel);
         // The kernel this program replaced is known by PID, and it is the one case
         // that needs no guessing: an elevated process cannot be recognised from
         // here by path, and this process has no rights over it either — only the
@@ -219,8 +206,8 @@ impl App {
         // The discovered path is the only path this program knows: the kernel it
         // started itself came from it, and `find_kernel` prefers a real binary over
         // a scoop shim.
-        if let Some(path) = &self.kernel_path {
-            match proc::stop_kernel(None, path) {
+        if let Some(path) = state::kernel_path(&self.kernel) {
+            match proc::stop_kernel(None, &path) {
                 Err(error) => return StopResult::Refused(error),
                 Ok(outcome) if outcome.denied > 0 => return StopResult::NeedsAdmin,
                 Ok(_) => {}
@@ -253,21 +240,98 @@ type Outcome = Option<Option<String>>;
 /// How long a just-restarted kernel may take to answer again.
 const KERNEL_START_BUDGET: Duration = Duration::from_secs(10);
 
+/// How long a kernel this program started gets to answer the controller.
+const KERNEL_STARTUP_BUDGET: Duration = Duration::from_secs(5);
+
+/// Per-probe timeout while waiting, so the loop cannot stall for the full
+/// configured controller timeout on every iteration.
+const KERNEL_PROBE_TIMEOUT_MS: u32 = 500;
+
 /// Everything an action needs besides the command itself.
 struct Worker<'a> {
     client: &'a Client,
     state: &'a Shared,
     hwnd: isize,
     /// The kernel this program may start or replace.
-    kernel_path: Option<&'a Path>,
+    kernel: &'a KernelSlot,
 }
 
-fn spawn_worker(
+/// What bringing the kernel up left behind for the poll loop.
+struct Startup {
+    /// The controller to poll.
     client: Client,
+    /// The kernel was started here, so it is worth waiting for it to answer.
+    started_kernel: bool,
+    /// Why the kernel could not be brought up, when it could not.
+    error: Option<String>,
+}
+
+/// Bring the kernel up: say that it is being looked for, then look and start it.
+///
+/// This is the part of startup that talks to the outside world, and it runs on
+/// the worker thread: the tray icon is registered before it, so a kernel that
+/// needs seconds to come up no longer holds back what the user sees. The search
+/// itself takes a moment on a machine where a dead address answers slowly, so it
+/// says what it is doing before it starts — every later phase publishes a note of
+/// its own, and the ones that do not (nothing found, a kernel already running) go
+/// back to the status line and the error, which are the honest answer there.
+fn startup(kernel: &KernelSlot, settings: &Settings, state: &Shared, hwnd: isize) -> Startup {
+    show_note(
+        state,
+        hwnd,
+        Some(i18n::t().status_looking_kernel.to_string()),
+    );
+    let startup = look_for_kernel(kernel, settings);
+    if !startup.started_kernel {
+        show_note(state, hwnd, None);
+    }
+    startup
+}
+
+/// The search itself, and the decision to start the kernel this program owns.
+fn look_for_kernel(kernel: &KernelSlot, settings: &Settings) -> Startup {
+    let path = discover::find_kernel(settings);
+    // Recorded before anything runs: "exit and stop mihomo" matches the kernel it
+    // may stop against this path, including one this program did not start.
+    state::write_kernel_path(kernel, path.clone());
+    let client = discover::find_controller(settings).unwrap_or_else(|| {
+        Client::new("127.0.0.1:9090", "", settings.controller_timeout_ms)
+            .expect("default controller address is always valid")
+    });
+    let mut startup = Startup {
+        client,
+        started_kernel: false,
+        error: None,
+    };
+    if startup.client.alive() || !settings.mihomo_auto_start {
+        return startup;
+    }
+    let Some(path) = path else {
+        startup.error = Some(i18n::t().error_kernel_not_found.to_string());
+        return startup;
+    };
+    // A kernel this program did not start is not replaced on a guess: its own
+    // controller may simply not be up yet.
+    if !proc::list_mihomo().is_empty() {
+        return startup;
+    }
+    match proc::start(&path, &discover::launch_args(settings)) {
+        Ok(child) => {
+            state::write_kernel_child(kernel, child);
+            startup.started_kernel = true;
+        }
+        Err(error) => startup.error = Some(error),
+    }
+    startup
+}
+
+/// Spawn the worker: it brings the kernel up, then keeps the snapshot fresh and
+/// carries out the commands the UI thread posts.
+fn spawn_worker(
     state: Shared,
     hwnd: isize,
     settings: Settings,
-    kernel_path: Option<PathBuf>,
+    kernel: KernelSlot,
     fatal: Option<String>,
 ) -> Result<Sender<Command>, String> {
     let (tx, rx) = mpsc::channel::<Command>();
@@ -276,20 +340,51 @@ fn spawn_worker(
         .name("mihomo-poll".into())
         .stack_size(256 * 1024)
         .spawn(move || {
+            let startup = startup(&kernel, &settings, &state, hwnd);
             let worker = Worker {
-                client: &client,
+                client: &startup.client,
                 state: &state,
                 hwnd,
-                kernel_path: kernel_path.as_deref(),
+                kernel: &kernel,
             };
-            let mut outcome: Outcome = fatal.map(Some);
+            // The kernel's own failure is the more specific one, so it wins over
+            // a settings file that could not be read.
+            let mut outcome: Outcome = startup.error.map(Some).or_else(|| fatal.map(Some));
+            // Set while the kernel this program started has not answered yet: the
+            // note stays up until it does, so a kernel that needs longer than the
+            // budget does not look like a tray that never came up.
+            let mut waiting_for_kernel = false;
+            if startup.started_kernel {
+                // Say what is going on before the bounded wait: the icon is
+                // registered already, and this is what the user sees until the
+                // kernel answers.
+                state::write_kernel_started(&state, i18n::t().status_starting_kernel.to_string());
+                post(hwnd, win::WM_REFRESH);
+                if wait_for_controller(worker.client) {
+                    show_note(&state, hwnd, None);
+                } else {
+                    show_note(
+                        &state,
+                        hwnd,
+                        Some(i18n::t().status_kernel_silent.to_string()),
+                    );
+                    waiting_for_kernel = true;
+                }
+            }
             let mut version = String::new();
             loop {
                 // Refresh first so the very first menu the user opens already has
                 // real data, then wait either for a command or the poll interval.
-                refresh(&client, &state, &mut version, outcome.take());
-                unsafe {
-                    PostMessageW(hwnd as HWND, win::WM_REFRESH, 0, 0);
+                refresh(worker.client, &state, &mut version, outcome.take());
+                post(hwnd, win::WM_REFRESH);
+                if waiting_for_kernel {
+                    // Over as soon as there is an answer — or as soon as the kernel
+                    // is gone, in which case "still waiting" would be a lie.
+                    let snapshot = state::read(&state);
+                    if snapshot.controller_ok || !snapshot.kernel_running {
+                        show_note(&state, hwnd, None);
+                        waiting_for_kernel = false;
+                    }
                 }
                 match rx.recv_timeout(poll) {
                     Ok(command) => outcome = Some(execute(&worker, &command)),
@@ -341,9 +436,13 @@ fn set_tun(worker: &Worker, enable: bool) -> Option<String> {
 
     // The helper blocks until it is done, and the UAC prompt is part of that, so
     // say what is happening before waiting; the note is cleared right after.
-    show_note(worker, Some(i18n::t().status_elevating_kernel.to_string()));
+    show_note(
+        worker.state,
+        worker.hwnd,
+        Some(i18n::t().status_elevating_kernel.to_string()),
+    );
     let elevated = win::elevate::run_self_elevated(&params);
-    show_note(worker, None);
+    show_note(worker.state, worker.hwnd, None);
     let code = match elevated {
         Ok(code) => code,
         Err(error) => return Some(error),
@@ -379,9 +478,13 @@ fn stop_kernel_elevated(worker: &Worker) -> Option<String> {
     };
     let params = win::elevate::kernel_stop_params(pid);
 
-    show_note(worker, Some(i18n::t().status_elevating_stop.to_string()));
+    show_note(
+        worker.state,
+        worker.hwnd,
+        Some(i18n::t().status_elevating_stop.to_string()),
+    );
     let elevated = win::elevate::run_self_elevated(&params);
-    show_note(worker, None);
+    show_note(worker.state, worker.hwnd, None);
     match elevated {
         Err(error) => Some(error),
         // `HELPER_NOT_STOPPED` means the helper, which can see every kernel,
@@ -454,10 +557,11 @@ fn pick_kernel(
 
 /// The kernel this program is responsible for right now.
 fn our_kernel(worker: &Worker) -> Option<u32> {
+    let path = state::kernel_path(worker.kernel);
     pick_kernel(
         &proc::list_mihomo(),
         state::read(worker.state).kernel_pid,
-        worker.kernel_path,
+        path.as_deref(),
     )
 }
 
@@ -472,13 +576,38 @@ fn wait_for_kernel(client: &Client) {
     }
 }
 
+/// Wait, bounded, for a kernel this program just started to answer.
+///
+/// The kernel is probed where its own configuration says it listens — the client
+/// that was discovered — with a short per-probe timeout, so a controller that is
+/// not up yet cannot make a single iteration take the configured timeout.
+fn wait_for_controller(client: &Client) -> bool {
+    let probe = Client {
+        timeout_ms: KERNEL_PROBE_TIMEOUT_MS,
+        ..client.clone()
+    };
+    let deadline = std::time::Instant::now() + KERNEL_STARTUP_BUDGET;
+    while std::time::Instant::now() < deadline {
+        if probe.alive() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Poke the UI window with a message it handles on its own thread.
+fn post(hwnd: isize, message: u32) {
+    unsafe {
+        PostMessageW(hwnd as HWND, message, 0, 0);
+    }
+}
+
 /// Publish what the worker is doing right now, so a menu the user opens while it
 /// blocked says something.
-fn show_note(worker: &Worker, message: Option<String>) {
-    state::write_status_note(worker.state, message);
-    unsafe {
-        PostMessageW(worker.hwnd as HWND, win::WM_REFRESH, 0, 0);
-    }
+fn show_note(state: &Shared, hwnd: isize, message: Option<String>) {
+    state::write_status_note(state, message);
+    post(hwnd, win::WM_REFRESH);
 }
 
 /// Rebuild the snapshot from the outside world.
@@ -568,6 +697,8 @@ fn tooltip(snapshot: &Snapshot) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     fn process(pid: u32, path: &str, denied: bool) -> proc::Process {
