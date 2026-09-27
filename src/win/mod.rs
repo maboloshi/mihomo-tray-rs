@@ -18,7 +18,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
     NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -120,7 +120,11 @@ fn icon_data(hwnd: HWND, icon: HICON, tooltip: &str) -> NOTIFYICONDATAW {
     data.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     data.hWnd = hwnd;
     data.uID = TRAY_ID;
-    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    // `NIF_SHOWTIP` is not decoration: with `NOTIFYICON_VERSION_4` the shell
+    // *suppresses* the standard tooltip unless it is asked for, and the icon then
+    // silently has no hover text at all (the menu still works, which hides this).
+    // See `NOTIFYICONDATAW.uFlags`.
+    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     data.uCallbackMessage = WM_TRAY;
     data.hIcon = icon;
     // `szTip` is a fixed 128-unit buffer that the shell expects to be NUL
