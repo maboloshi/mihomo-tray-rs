@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.85"
 description = "Minimal Windows tray app for the mihomo core"
 license = "MIT"
+repository = "https://github.com/maboloshi/mihomo-tray-rs"
+readme = "README.md"
+keywords = ["mihomo", "clash", "tray", "windows", "proxy"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 windows-sys = { version = "0.61", features = [
