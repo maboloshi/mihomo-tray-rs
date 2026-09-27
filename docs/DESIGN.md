@@ -17,11 +17,11 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 | `Mihomo 状态: 运行中 (rule)` | 灰显状态行；未运行时显示 `未运行`，控制器不可达时显示 `控制器不可达` |
 | `系统代理` | 写/清 `HKCU\...\Internet Settings` 的 `ProxyEnable`/`ProxyServer`/`ProxyOverride`，并通知 WinINet 刷新 |
 | `代理模式 ▶` | `Rule` / `Global` / `Direct` 单选互斥（原生 radio 标记） |
-| `TUN 模式` | `PATCH /configs` 后**回读** `tun.enable` 确认；失败提示（多因未提权） |
+| `TUN 模式` | `PATCH /configs` 后**回读** `tun.enable` 确认；仍为 `false` 时用提权副本重启内核再重试（UAC 一次，取消无副作用） |
 | `代理分组 ▶` | `GLOBAL` + 其余可切换组，每组一个子菜单；成员单选切换；只读组（`LoadBalance`/`Relay`）灰显当前值 |
 | `开机自启动` | HKCU Run 键增删 |
 | `重载配置` | `PUT /configs?force=true`，body `{"path":""}`（让 mihomo 重载它自己的配置文件） |
-| `退出 ▶` | `退出并停止 Mihomo`（只结束本程序掌控的进程）/ `仅退出程序` |
+| `退出 ▶` | `退出并停止 Mihomo`（只结束本程序掌控或路径匹配的进程；提权内核由提权副本停止，再确认一次 UAC）/ `仅退出程序` |
 
 附加（非菜单）：单实例互斥；资源管理器重启后自动重新注册托盘图标。
 
@@ -141,7 +141,7 @@ SetMenuInfo(hmenu, &mi);
 | 探活 | `GET /` | 返回 `{"hello":"mihomo"}` |
 | 读状态 | `GET /configs` | `mode`、`mixed-port`、`tun.enable`（后者是**已生效**值） |
 | 切模式 | `PATCH /configs` `{"mode":"rule"}` | 会重建全部 inbound；`tun` 未变时提前返回，不断流 |
-| 开关 TUN | `PATCH /configs` `{"tun":{"enable":true}}` | TUN 建立失败只写日志并把 enable 置 false，**HTTP 仍返回 204** → 必须回读确认；建 Wintun 需要管理员 |
+| 开关 TUN | `PATCH /configs` `{"tun":{"enable":true}}` | TUN 建立失败只写日志并把 enable 置 false，**HTTP 仍返回 204** → 必须回读确认；回读仍为 false 说明内核没提权：用 `--kernel-start-elevated <pid>` 提权副本重启内核后重试（建 Wintun 需要管理员） |
 | 重载配置 | `PUT /configs?force=true`，body `{"path":""}` | **空 body 会 400**；不带 `force` 不重建 inbound；`path` 为空时 mihomo 回落到自己启动时的配置文件 |
 | 分组与节点 | `GET /proxies` | 顺序=字典序；`all` 非空的即分组；`history` 可能不存在（未测速） |
 | 切换节点 | `PUT /proxies/{urlencode(group)}` `{"name":"member"}` | 组名/成员名必须 percent-encode（中文必需）；仅 `Selector`/`URLTest`/`Fallback` 可写，其余返回 400 |
@@ -162,10 +162,10 @@ src/win/tray.rs             # Shell_NotifyIconW ADD/MODIFY/DELETE、tooltip、�
 src/win/menu.rs             # 菜单构建、id 表、TrackPopupMenuEx、深色模式
 src/win/proxy.rs            # 系统代理注册表 + InternetSetOptionW(39/37)
 src/win/autostart.rs        # HKCU Run
-src/win/elevate.rs          # 管理员检测 + ShellExecuteW("runas") 重启
+src/win/elevate.rs          # 提权副本的参数（只有一个 PID）+ ShellExecuteExW("runas") + 等退出码
 src/mihomo/api.rs           # WinHTTP 客户端 + 上述端点
-src/mihomo/discover.rs      # §4 的三条发现链
-src/mihomo/proc.rs          # 启动/停止内核（只停自己启动的 PID）
+src/mihomo/discover.rs      # §4 的三条发现链 + `-d <配置目录>`
+src/mihomo/proc.rs          # 启动/停止内核（只停路径匹配的 PID）+ 提权副本主体（按 PID 读映像/命令行）
 src/settings.rs             # tray.yml 读取（极简 YAML 子集）
 src/state.rs                # 状态结构 + 轮询线程 + 唤醒 UI
 src/icon.rs                 # RGBA → HICON（多尺寸、状态色）
@@ -211,8 +211,11 @@ ui:
 
 - 状态来源优先级：controller 实时值 > `tray.yml` > 默认值。`mixed-port` 从 `GET /configs` 取（系统代理指向它），不解析 yml。
 - 控制器不可达：状态行 `控制器不可达`，模式/TUN/分组项灰显；不自动重启内核（避免和外部管理方式打架），仅当 `mihomo.auto_start` 且进程确实不存在时才拉起。
-- TUN 开启后回读仍为 `false` → tooltip 提示「TUN 未生效（通常需要管理员权限）」，菜单提供「以管理员身份重启」。
-- 停止内核只针对本程序启动的 PID（记录 `HANDLE`/进程 ID），不使用 `taskkill /IM`，避免误杀其他实例。
+- TUN 开启后回读仍为 `false` → 内核没有管理员权限：启动自身的提权副本（`--kernel-start-elevated <pid>`）重启内核后重试；再失败则 tooltip 提示「TUN 未生效（通常需要管理员权限）」。取消 UAC 报「提权启动被取消或失败」，且此时旧内核还没被终止。
+- 提权副本只接受一个 PID，绝不接受路径或参数：映像与命令行都从那个进程读（`NtQueryInformationProcess(ProcessCommandLineInformation)`，见 §5），并且要求映像名是 `mihomo.exe`。否则副本就等于一个"UAC 弹窗写着本程序、实际以管理员身份运行任意程序"的提权原语；顺带这样也永远不用重建内核的启动参数（`-d`/`-f`/`-ext-ctl` 原样继承）。读不到命令行时报「无法读取内核自己的启动参数，未重启内核」并放弃本次重启。
+- 提权副本是同一个 exe 的隐藏模式，在任何单实例/窗口逻辑之前处理；托盘进程自身永远不提权，也不预置计划任务（计划任务服务可能被禁用）。
+- 停止内核只针对本程序启动的 PID（记录 `HANDLE`/进程 ID）或路径匹配的实例，不使用 `taskkill /IM`，避免误杀其他实例。停止时优先用「本程序实际启动过的映像路径」（`kernel_target`），发现到的路径只作兜底。
+- 提权内核的映像路径**读不出来**（`OpenProcess` 能开、`QueryFullProcessImageNameW` 被拒，实测如此），因此"读不到路径"被记为 *unverifiable* 而不是"无关进程"：这种进程改由 `--kernel-stop-elevated <pid>` 副本去停止（副本能读路径，仍只停匹配的那个），成功了 worker 才发 `WM_EXIT` 让托盘退出；副本报「没匹配到 / 连副本也无权」则只提示、托盘继续运行。同一个 `mihomo.exe` 有多个实例时，PID 按「先记录过的映像 → 发现链的路径 → 唯一在跑的那个 → 那个读不到路径（提权）的」依次挑选。
 - 系统代理：默认「退出时保持现状」（`keep`）；开启前保存 `ProxyServer`/`ProxyOverride` 快照，便于 Phase 2 的还原。
 
 ---
@@ -256,7 +259,7 @@ ui:
 | 互相引用的分组导致嵌套展开 ~G⁴，右键卡死 UI 线程 | `MAX_ITEMS = 1500` 全局项数预算，超限追加灰显「项目过多，已省略」并停止递归 |
 | 重入守卫在 `dispatch` 之前清除，理论上可重入产生别名 `&mut App` | 守卫覆盖整个 `dispatch`（`ShellExecuteW`/`InternetSetOptionW` 会泵消息） |
 | 「退出并停止 Mihomo」可能杀掉非本程序启动的实例 | 失败关闭：路径未知或 `OpenProcess` 被拒时不终止，并提示「无法确认归属」 |
-| 「以管理员身份重启」与单实例互斥体竞争导致托盘消失 | 提权前先 `instance::release()`（失败则重新获取） |
+| 提权副本重启内核后，托盘仍持有旧内核的 `Child` 句柄，「退出并停止」会以为已经停掉 | 提权成功后 worker 用 `WM_KERNEL_REPLACED` 让 UI 线程 `forget_kernel()`，回到按路径匹配 |
 | `szTip` 可能无 NUL 终止 | 按 UTF-16 单元截断到 127 并留终止位 |
 | `mixed-port` 无检查强转 `u16`（70000 → 4464 并写进系统代理） | 越界过滤为 0 |
 | `CreateDIBSection` 部分失败时泄漏 `HBITMAP`；AND mask 未初始化 | 失败路径释放，mask 传零填充缓冲 |
