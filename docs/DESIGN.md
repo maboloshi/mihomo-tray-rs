@@ -42,7 +42,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 | 设置文件 | 手写极简 YAML 子集解析 | 文件由本程序定义，子集受限已足够；省约 100 KB 与一个依赖 |
 | 注册表 | `winreg` 0.56 | 纯 Rust、无 `windows` crate 依赖、API 直接 |
 | 图标 | `CreateIconIndirect` 由代码生成 RGBA | 0 依赖；不做纯色方块（多尺寸 16/20/24/32 + 描边 + 状态色） |
-| 深色菜单 | 清单 + `uxtheme` 序号 135/133 + `SetWindowTheme(hwnd,"DarkMode_Explorer")` | 已实测可强制深色；失败时降级浅色菜单，不影响功能 |
+| 深色菜单 | 清单 + `uxtheme` 序号 135/133/136 + `SetWindowTheme(hwnd,"DarkMode_Explorer")` | 已实测可强制深色；`WM_SETTINGCHANGE`(`ImmersiveColorSet`) 时重算并 `FlushMenuThemes`，运行中切换系统主题即时生效；失败时降级浅色菜单，不影响功能 |
 
 **体积/内存实测**（`opt-level="z"`、`lto`、`codegen-units=1`、`panic="abort"`、`strip`，无 UPX，x64）：
 

@@ -12,7 +12,7 @@ pub mod proxy;
 
 use std::sync::OnceLock;
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
@@ -26,7 +26,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetMessageW, GetWindowLongPtrW, HICON, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
     RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_NONOTIFY, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
-    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WS_POPUP,
+    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
 };
 
 use crate::app::App;
@@ -127,43 +127,73 @@ fn icon_data(hwnd: HWND, icon: HICON, tooltip: &str) -> NOTIFYICONDATAW {
     data
 }
 
-/// Dark menus need an undocumented (but stable and widely used) uxtheme opt-in.
-/// When it is unavailable the shell simply keeps drawing a light menu.
+/// Values `SetPreferredAppMode` accepts. The enum is undocumented and uxtheme
+/// exports the setter by ordinal only, so the numbers are what we have.
+const APP_MODE_DEFAULT: i32 = 0;
+const APP_MODE_FORCE_DARK: i32 = 2;
+
+/// The `uxtheme` module, loaded once and deliberately never unloaded: the entry
+/// points below stay valid for the process lifetime, and a theme change can
+/// happen any number of times.
+fn uxtheme() -> HMODULE {
+    static MODULE: OnceLock<isize> = OnceLock::new();
+    *MODULE.get_or_init(|| unsafe { LoadLibraryW(wide("uxtheme.dll").as_ptr()) as isize })
+        as HMODULE
+}
+
+/// Apply the menu theme. Called at startup and again whenever Windows reports
+/// that the immersive colour set changed, so a running tray icon follows a
+/// light/dark switch instead of keeping the theme it started with.
+///
+/// Dark menus need an undocumented (but stable and widely used) uxtheme
+/// opt-in. When it is unavailable the shell simply keeps drawing a light menu.
 pub fn apply_dark_mode(hwnd: HWND, preference: DarkMenu) {
     let dark = match preference {
         DarkMenu::Always => true,
         DarkMenu::Never => false,
         DarkMenu::Auto => apps_use_dark_theme(),
     };
-    if !dark {
-        return;
-    }
     unsafe {
-        let uxtheme = LoadLibraryW(wide("uxtheme.dll").as_ptr());
-        if uxtheme.is_null() {
+        let module = uxtheme();
+        if module.is_null() {
             return;
         }
         type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
         type AllowDarkModeForWindow = unsafe extern "system" fn(HWND, i32) -> i32;
         type SetWindowTheme = unsafe extern "system" fn(HWND, *const u16, *const u16) -> i32;
+        type FlushMenuThemes = unsafe extern "system" fn();
 
         // Prefer the exported name; fall back to the well-known ordinals only
         // when the name is missing (they are not part of the documented ABI).
-        let set_mode_proc = GetProcAddress(uxtheme, c"SetPreferredAppMode".as_ptr() as *const u8)
-            .or_else(|| GetProcAddress(uxtheme, 135 as *const u8));
-        if let Some(proc) = set_mode_proc {
+        if let Some(proc) = GetProcAddress(module, c"SetPreferredAppMode".as_ptr() as *const u8)
+            .or_else(|| GetProcAddress(module, 135 as *const u8))
+        {
             let set_mode: SetPreferredAppMode = std::mem::transmute(proc);
-            set_mode(2); // ForceDark
+            set_mode(if dark {
+                APP_MODE_FORCE_DARK
+            } else {
+                APP_MODE_DEFAULT
+            });
         }
-        let allow_proc = GetProcAddress(uxtheme, c"AllowDarkModeForWindow".as_ptr() as *const u8)
-            .or_else(|| GetProcAddress(uxtheme, 133 as *const u8));
-        if let Some(proc) = allow_proc {
+        if let Some(proc) = GetProcAddress(module, c"AllowDarkModeForWindow".as_ptr() as *const u8)
+            .or_else(|| GetProcAddress(module, 133 as *const u8))
+        {
             let allow: AllowDarkModeForWindow = std::mem::transmute(proc);
-            allow(hwnd, 1);
+            allow(hwnd, i32::from(dark));
         }
-        if let Some(proc) = GetProcAddress(uxtheme, c"SetWindowTheme".as_ptr() as *const u8) {
+        if let Some(proc) = GetProcAddress(module, c"SetWindowTheme".as_ptr() as *const u8) {
             let set_theme: SetWindowTheme = std::mem::transmute(proc);
-            set_theme(hwnd, wide("DarkMode_Explorer").as_ptr(), std::ptr::null());
+            let theme = wide(if dark { "DarkMode_Explorer" } else { "" });
+            set_theme(hwnd, theme.as_ptr(), std::ptr::null());
+        }
+        // The mode above only reaches menus created afterwards; flushing drops
+        // the theme state the shell has already cached, which is what makes the
+        // switch visible without restarting the program.
+        if let Some(proc) = GetProcAddress(module, c"FlushMenuThemes".as_ptr() as *const u8)
+            .or_else(|| GetProcAddress(module, 136 as *const u8))
+        {
+            let flush: FlushMenuThemes = std::mem::transmute(proc);
+            flush();
         }
     }
 }
@@ -234,6 +264,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             other if other == taskbar_created() => {
                 (*app).on_taskbar_created();
+                0
+            }
+            WM_SETTINGCHANGE => {
+                // Broadcast after the app light/dark preference changes. Only the
+                // immersive colour set can affect the menu theme, and reacting to
+                // `WM_THEMECHANGED` instead would recurse: `SetWindowTheme` sends
+                // that message back to the window.
+                if immersive_colors_changed(lparam) {
+                    apply_dark_mode(hwnd, (*app).settings.dark_menu);
+                }
                 0
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -318,6 +358,20 @@ fn clamp_to_work_area(x: i32, y: i32) -> (i32, i32) {
 fn taskbar_created() -> u32 {
     static MESSAGE: OnceLock<u32> = OnceLock::new();
     *MESSAGE.get_or_init(|| unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) })
+}
+
+/// `WM_SETTINGCHANGE` carries the name of the changed area in `lParam`. The
+/// comparison is bounded by the name itself so a `lParam` that is not a string
+/// cannot be walked off the end.
+fn immersive_colors_changed(lparam: LPARAM) -> bool {
+    if lparam == 0 {
+        return false;
+    }
+    let expected: Vec<u16> = "ImmersiveColorSet".encode_utf16().collect();
+    let value = lparam as *const u16;
+    unsafe {
+        (0..expected.len()).all(|i| *value.add(i) == expected[i]) && *value.add(expected.len()) == 0
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {
