@@ -12,6 +12,7 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+use crate::i18n;
 use crate::icon::Icons;
 use crate::mihomo::{Client, proc};
 use crate::settings::Settings;
@@ -198,7 +199,7 @@ impl App {
             return Ok(());
         }
         let Some(path) = self.kernel_path.clone() else {
-            return Err("未找到 mihomo.exe 路径，无法确认要停止的进程".into());
+            return Err(i18n::t().error_no_kernel_path.to_string());
         };
         let mut stopped = 0usize;
         for process in proc::list_mihomo() {
@@ -213,7 +214,7 @@ impl App {
             }
         }
         if stopped == 0 {
-            return Err("未找到与本程序配置匹配的 mihomo 进程".into());
+            return Err(i18n::t().error_no_matching_kernel.to_string());
         }
         Ok(())
     }
@@ -259,7 +260,7 @@ fn spawn_worker(
             }
         })
         .map(|_| tx)
-        .map_err(|error| format!("无法启动轮询线程: {error}"))
+        .map_err(|error| i18n::t().error_spawn_worker(&error.to_string()))
 }
 
 fn execute(client: &Client, command: &Command) -> Option<String> {
@@ -307,7 +308,7 @@ fn refresh(client: &Client, shared: &Shared, version: &mut String, outcome: Outc
         Err(error) => {
             snapshot.controller_ok = false;
             snapshot.controller_error =
-                Some(format!("控制器 {} 不可达: {error}", client.address()));
+                Some(i18n::t().error_controller_unreachable(&client.address(), &error));
         }
     }
 
@@ -319,19 +320,30 @@ fn refresh(client: &Client, shared: &Shared, version: &mut String, outcome: Outc
 }
 
 fn tooltip(snapshot: &Snapshot) -> String {
+    let messages = i18n::t();
     let mut text = String::from("mihomo-tray\n");
     text.push_str(&snapshot.status_line());
     if snapshot.controller_ok {
         if !snapshot.version.is_empty() {
-            text.push_str(&format!("\n内核: mihomo {}", snapshot.version));
+            text.push_str(&format!("\n{}", messages.tooltip_kernel(&snapshot.version)));
         }
         text.push_str(&format!(
-            "\n系统代理: {} · TUN: {}",
-            if snapshot.sysproxy { "开" } else { "关" },
-            if snapshot.tun { "开" } else { "关" }
+            "\n{}",
+            messages.tooltip_proxy_tun(
+                if snapshot.sysproxy {
+                    &messages.state_on
+                } else {
+                    &messages.state_off
+                },
+                if snapshot.tun {
+                    &messages.state_on
+                } else {
+                    &messages.state_off
+                }
+            )
         ));
         if snapshot.mixed_port > 0 {
-            text.push_str(&format!("\n端口: {}", snapshot.mixed_port));
+            text.push_str(&format!("\n{}", messages.tooltip_port(snapshot.mixed_port)));
         }
     }
     if let Some(error) = snapshot.error() {

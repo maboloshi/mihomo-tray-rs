@@ -30,6 +30,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::app::App;
+use crate::i18n;
 use crate::settings::DarkMenu;
 
 pub const WM_TRAY: u32 = WM_APP + 1;
@@ -70,7 +71,7 @@ pub fn create_message_window(app: *mut App) -> Result<HWND, String> {
             std::ptr::null(),
         );
         if hwnd.is_null() {
-            return Err("创建消息窗口失败".into());
+            return Err(i18n::t().error_message_window.to_string());
         }
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
         Ok(hwnd)

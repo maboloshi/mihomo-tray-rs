@@ -8,6 +8,8 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+use crate::i18n;
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -34,7 +36,7 @@ pub fn is_admin() -> bool {
 
 /// Re-launch this executable through the UAC prompt, then let the caller exit.
 pub fn relaunch_as_admin() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| i18n::t().error_current_exe(&e.to_string()))?;
     let operation = wide("runas");
     let file = wide(&exe.to_string_lossy());
     let result = unsafe {
@@ -48,7 +50,7 @@ pub fn relaunch_as_admin() -> Result<(), String> {
         )
     } as isize;
     if result <= 32 {
-        return Err("提权启动被取消或失败".into());
+        return Err(i18n::t().error_elevate_cancelled.to_string());
     }
     Ok(())
 }

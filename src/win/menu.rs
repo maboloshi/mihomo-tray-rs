@@ -7,6 +7,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MIM_MAXHEIGHT, SM_CYSCREEN, SetMenuInfo,
 };
 
+use crate::i18n;
 use crate::settings::Settings;
 use crate::state::{Group, Snapshot};
 
@@ -43,6 +44,7 @@ impl Menu {
     }
 
     pub fn build(snapshot: &Snapshot, settings: &Settings, admin: bool) -> Menu {
+        let messages = i18n::t();
         let mut builder = Builder::default();
         let root = builder.new_menu();
         let ready = snapshot.controller_ok;
@@ -55,7 +57,7 @@ impl Menu {
 
         builder.checked(
             root,
-            "系统代理",
+            &messages.menu_system_proxy,
             Action::ToggleSysProxy,
             snapshot.sysproxy,
             true,
@@ -63,9 +65,9 @@ impl Menu {
 
         let mode_menu = builder.new_menu();
         for (label, mode) in [
-            ("Rule (规则)", "rule"),
-            ("Global (全局)", "global"),
-            ("Direct (直连)", "direct"),
+            (&*messages.menu_mode_rule, "rule"),
+            (&*messages.menu_mode_global, "global"),
+            (&*messages.menu_mode_direct, "direct"),
         ] {
             builder.checked(
                 mode_menu,
@@ -75,9 +77,15 @@ impl Menu {
                 ready,
             );
         }
-        builder.popup(root, "代理模式", mode_menu, ready, false);
+        builder.popup(root, &messages.menu_mode, mode_menu, ready, false);
 
-        builder.checked(root, "TUN 模式", Action::ToggleTun, snapshot.tun, ready);
+        builder.checked(
+            root,
+            &messages.menu_tun,
+            Action::ToggleTun,
+            snapshot.tun,
+            ready,
+        );
 
         let groups_menu = builder.new_menu();
         let groups = ordered_groups(snapshot, settings);
@@ -96,7 +104,7 @@ impl Menu {
         }
         builder.popup(
             root,
-            "代理分组",
+            &messages.menu_groups,
             groups_menu,
             ready && !groups.is_empty(),
             false,
@@ -105,16 +113,16 @@ impl Menu {
         builder.separator(root);
         builder.checked(
             root,
-            "开机自启动",
+            &messages.menu_autostart,
             Action::ToggleAutostart,
             snapshot.autostart,
             true,
         );
-        builder.item(root, "重载配置", Action::Reload, false, ready);
+        builder.item(root, &messages.menu_reload, Action::Reload, false, ready);
         if !admin {
             builder.item(
                 root,
-                "以管理员身份重启",
+                &messages.menu_restart_admin,
                 Action::RestartAsAdmin,
                 false,
                 true,
@@ -125,13 +133,19 @@ impl Menu {
         let exit_menu = builder.new_menu();
         builder.item(
             exit_menu,
-            "退出并停止 Mihomo",
+            &messages.menu_exit_stop_kernel,
             Action::ExitStopKernel,
             false,
             true,
         );
-        builder.item(exit_menu, "仅退出程序", Action::ExitOnly, false, true);
-        builder.popup(root, "退出", exit_menu, true, false);
+        builder.item(
+            exit_menu,
+            &messages.menu_exit_only,
+            Action::ExitOnly,
+            false,
+            true,
+        );
+        builder.popup(root, &messages.menu_exit, exit_menu, true, false);
 
         Menu {
             handle: root,
@@ -196,7 +210,7 @@ fn add_members(
     if !group.fixed.is_empty() && !builder.out_of_budget() {
         builder.checked(
             menu,
-            "自动（取消固定）",
+            &i18n::t().menu_unfix,
             Action::Unfix(group.name.clone()),
             false,
             true,
@@ -238,12 +252,12 @@ fn add_member_list(
     members: &[String],
 ) {
     if builder.out_of_budget() {
-        builder.plain(menu, "(项目过多，已省略)", false);
+        builder.plain(menu, &i18n::t().menu_truncated, false);
         return;
     }
     for member in members {
         if builder.out_of_budget() {
-            builder.plain(menu, "(项目过多，已省略)", false);
+            builder.plain(menu, &i18n::t().menu_truncated, false);
             break;
         }
         let nested = depth < MAX_DEPTH
@@ -278,7 +292,7 @@ fn add_member_list(
         }
     }
     if members.is_empty() {
-        builder.plain(menu, "(空)", false);
+        builder.plain(menu, &i18n::t().menu_empty, false);
     }
 }
 
@@ -369,10 +383,11 @@ fn group_label(group: &Group) -> String {
     if group.switchable && group.kind == "Selector" {
         return name;
     }
+    let messages = i18n::t();
     if group.fixed.is_empty() {
-        format!("{name} ({})", group.kind)
+        messages.menu_group_label(&name, &group.kind)
     } else {
-        format!("{name} ({} · 已固定)", group.kind)
+        messages.menu_group_label_pinned(&name, &group.kind)
     }
 }
 
@@ -501,8 +516,8 @@ mod tests {
             group("Zulu", true, "DIRECT", &["DIRECT"]),
         ]);
         let menu = Menu::build(&snapshot, &settings, true);
-        let groups = find_submenu(menu.handle, "代理分组");
-        assert!(!groups.is_null(), "代理分组 submenu missing");
+        let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
+        assert!(!groups.is_null(), "groups submenu missing");
         assert_eq!(labels(groups), vec!["Zulu", "GLOBAL", "Alpha"]);
     }
 
@@ -513,9 +528,9 @@ mod tests {
             group("Auto", false, "A", &["A", "B"]),
         ]);
         let menu = Menu::build(&snapshot, &Settings::default(), true);
-        let groups = find_submenu(menu.handle, "代理分组");
+        let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
         let global = find_submenu(groups, "GLOBAL");
-        let auto = find_submenu(groups, "Auto (URLTest)");
+        let auto = find_submenu(groups, &i18n::t().menu_group_label("Auto", "URLTest"));
         assert!(!global.is_null() && !auto.is_null());
 
         for (index, action) in menu.actions.iter().enumerate() {
@@ -551,19 +566,20 @@ mod tests {
         auto.kind = "URLTest".to_string();
         auto.fixed = "A".to_string();
         let menu = Menu::build(&snapshot(vec![auto]), &Settings::default(), true);
-        let groups = find_submenu(menu.handle, "代理分组");
-        assert_eq!(labels(groups), vec!["Auto (URLTest · 已固定)"]);
+        let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
+        let pinned = i18n::t().menu_group_label_pinned("Auto", "URLTest");
+        assert_eq!(labels(groups), vec![pinned.clone()]);
 
-        let auto = find_submenu(groups, "Auto (URLTest · 已固定)");
+        let auto = find_submenu(groups, &pinned);
         assert!(!auto.is_null());
-        assert_eq!(label_at(auto, 0), "自动（取消固定）");
+        assert_eq!(label_at(auto, 0), i18n::t().menu_unfix.to_string());
 
         for (index, action) in menu.actions.iter().enumerate() {
             let id = ID_BASE + index;
             match action {
                 Action::Unfix(group) => {
                     assert_eq!(group, "Auto");
-                    assert_eq!(label(auto, id), "自动（取消固定）");
+                    assert_eq!(label(auto, id), i18n::t().menu_unfix.to_string());
                 }
                 Action::Select { group, member } => {
                     assert_eq!(group, "Auto");
@@ -608,7 +624,7 @@ mod tests {
     fn control_characters_and_ampersands_in_names_are_neutralised() {
         let snapshot = snapshot(vec![group("G&1", true, "a\nb", &["a\nb", "ok"])]);
         let menu = Menu::build(&snapshot, &Settings::default(), true);
-        let groups = find_submenu(menu.handle, "代理分组");
+        let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
         assert_eq!(label_at(groups, 0), "G&&1");
         let group_menu = find_submenu(groups, "G&&1");
         assert_eq!(label_at(group_menu, 0), "a b");

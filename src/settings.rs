@@ -100,14 +100,25 @@ pub fn settings_path() -> PathBuf {
     PathBuf::from("tray.yml")
 }
 
+/// A settings file that exists but could not be read. The message is rendered by
+/// the caller, which is the only place that knows the active UI language.
+#[derive(Debug)]
+pub struct LoadError {
+    pub path: PathBuf,
+    pub error: std::io::Error,
+}
+
 /// Load the settings file, or defaults when it does not exist.
-pub fn load(path: &Path) -> (Settings, Option<String>) {
+pub fn load(path: &Path) -> (Settings, Option<LoadError>) {
     match std::fs::read_to_string(path) {
         Ok(text) => (parse(&text), None),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Settings::default(), None),
         Err(e) => (
             Settings::default(),
-            Some(format!("读取 {} 失败: {e}", path.display())),
+            Some(LoadError {
+                path: path.to_path_buf(),
+                error: e,
+            }),
         ),
     }
 }
@@ -197,7 +208,9 @@ pub(crate) fn strip_comment(line: &str) -> &str {
     line
 }
 
-fn unquote(v: &str) -> String {
+/// Strip one matching pair of surrounding quotes. Shared with the language-file
+/// reader, which accepts the same quoted scalars.
+pub(crate) fn unquote(v: &str) -> String {
     let v = v.trim();
     let bytes = v.as_bytes();
     if bytes.len() >= 2

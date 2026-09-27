@@ -10,12 +10,14 @@ use windows_sys::Win32::Networking::WinInet::{
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
 
+use crate::i18n;
+
 const INTERNET_SETTINGS: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
 fn read() -> Result<RegKey, String> {
     RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(INTERNET_SETTINGS, KEY_READ | KEY_SET_VALUE)
-        .map_err(|e| format!("打开 Internet Settings 失败: {e}"))
+        .map_err(|e| i18n::t().error_open_internet_settings(&e.to_string()))
 }
 
 pub fn is_enabled() -> bool {
@@ -29,9 +31,9 @@ pub fn is_enabled() -> bool {
 pub fn enable(port: u16, extra_bypass: &[String]) -> Result<(), String> {
     let key = read()?;
     key.set_value("ProxyEnable", &1u32)
-        .map_err(|e| format!("设置 ProxyEnable 失败: {e}"))?;
+        .map_err(|e| i18n::t().error_set_proxy_enable(&e.to_string()))?;
     key.set_value("ProxyServer", &format!("127.0.0.1:{port}"))
-        .map_err(|e| format!("设置 ProxyServer 失败: {e}"))?;
+        .map_err(|e| i18n::t().error_set_proxy_server(&e.to_string()))?;
 
     // Keep a bypass list the user already curated; only seed it when empty.
     let existing: String = key.get_value("ProxyOverride").unwrap_or_default();
@@ -43,7 +45,7 @@ pub fn enable(port: u16, extra_bypass: &[String]) -> Result<(), String> {
             .collect();
         entries.push("<local>".to_string());
         key.set_value("ProxyOverride", &entries.join(";"))
-            .map_err(|e| format!("设置 ProxyOverride 失败: {e}"))?;
+            .map_err(|e| i18n::t().error_set_proxy_override(&e.to_string()))?;
     }
     refresh();
     Ok(())
@@ -52,7 +54,7 @@ pub fn enable(port: u16, extra_bypass: &[String]) -> Result<(), String> {
 pub fn disable() -> Result<(), String> {
     let key = read()?;
     key.set_value("ProxyEnable", &0u32)
-        .map_err(|e| format!("设置 ProxyEnable 失败: {e}"))?;
+        .map_err(|e| i18n::t().error_set_proxy_enable(&e.to_string()))?;
     refresh();
     Ok(())
 }

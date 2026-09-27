@@ -58,17 +58,17 @@ impl Snapshot {
 
     /// One line summary used for the disabled status item and the tooltip.
     pub fn status_line(&self) -> String {
+        let messages = crate::i18n::t();
         if self.controller_ok {
-            let mode = if self.mode.is_empty() {
+            messages.status_running(if self.mode.is_empty() {
                 "unknown"
             } else {
                 &self.mode
-            };
-            format!("Mihomo 状态: 运行中 ({mode})")
+            })
         } else if self.kernel_running {
-            "Mihomo 状态: 内核运行中，控制器不可达".to_string()
+            messages.status_controller_unreachable.to_string()
         } else {
-            "Mihomo 状态: 未运行".to_string()
+            messages.status_stopped.to_string()
         }
     }
 }

@@ -9,6 +9,7 @@ use windows_sys::Win32::Networking::WinHttp::{
     WinHttpSetTimeouts,
 };
 
+use crate::i18n;
 use crate::state::Group;
 
 #[derive(Clone, Debug)]
@@ -67,11 +68,11 @@ impl Client {
                 0,
             );
             if session.is_null() {
-                return Err("WinHttpOpen 失败".into());
+                return Err(i18n::t().error_winhttp_open.to_string());
             }
             let t = self.timeout_ms as i32;
             WinHttpSetTimeouts(session, t, t, t, t);
-            let mut result = Err("请求失败".to_string());
+            let mut result = Err(i18n::t().error_request_failed.to_string());
 
             let connect = WinHttpConnect(session, host_w.as_ptr(), self.port, 0);
             if !connect.is_null() {
@@ -137,12 +138,12 @@ impl Client {
                             buf.extend_from_slice(&chunk[..read as usize]);
                         }
                         result = if overflow {
-                            Err("响应过大（超过 8 MiB）".into())
+                            Err(i18n::t().error_response_too_large.to_string())
                         } else {
                             Ok((status as u16, String::from_utf8_lossy(&buf).into_owned()))
                         };
                     } else {
-                        result = Err("HTTP 请求失败".into());
+                        result = Err(i18n::t().error_http_request_failed.to_string());
                     }
                     WinHttpCloseHandle(request);
                 }
@@ -171,7 +172,7 @@ impl Client {
 
     fn json(&self, path: &str) -> Result<Value, String> {
         let text = self.body_of("GET", path, None)?;
-        serde_json::from_str(&text).map_err(|e| format!("JSON 解析失败: {e}"))
+        serde_json::from_str(&text).map_err(|e| i18n::t().error_json_parse(&e.to_string()))
     }
 
     // --- endpoints -------------------------------------------------------

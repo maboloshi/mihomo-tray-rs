@@ -13,6 +13,8 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW, TerminateProcess,
 };
 
+use crate::i18n;
+
 const KERNEL_EXE: &str = "mihomo.exe";
 
 #[derive(Debug, Clone)]
@@ -87,19 +89,19 @@ pub fn start(exe: &Path, args: &[String]) -> Result<Child, String> {
     }
     command
         .spawn()
-        .map_err(|e| format!("启动 {} 失败: {e}", exe.display()))
+        .map_err(|e| i18n::t().error_start_process(&exe.display().to_string(), &e.to_string()))
 }
 
 pub fn kill(pid: u32) -> Result<(), String> {
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
         if handle.is_null() {
-            return Err(format!("无法打开进程 {pid}"));
+            return Err(i18n::t().error_open_process(pid));
         }
         let ok = TerminateProcess(handle, 0);
         CloseHandle(handle);
         if ok == 0 {
-            return Err(format!("结束进程 {pid} 失败"));
+            return Err(i18n::t().error_kill_process(pid));
         }
     }
     Ok(())

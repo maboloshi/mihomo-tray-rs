@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod i18n;
 mod icon;
 mod instance;
 mod mihomo;
@@ -26,6 +27,8 @@ fn main() {
 
     let settings_path = settings::settings_path();
     settings::ensure_default_file(&settings_path);
+    // First, because everything below reports failures through the UI strings.
+    i18n::init();
     let (settings, settings_error) = settings::load(&settings_path);
 
     let kernel_path = mihomo::discover::find_kernel(&settings);
@@ -33,7 +36,9 @@ fn main() {
 
     // Launch the kernel only when nothing is answering and the user allows it.
     let mut child = None;
-    let mut fatal = settings_error;
+    let mut fatal = settings_error.map(|error| {
+        i18n::t().error_read_settings(&error.path.display().to_string(), &error.error.to_string())
+    });
     if let Some(discovered) = client.as_ref() {
         if !discovered.alive() && settings.mihomo_auto_start {
             match &kernel_path {
@@ -47,9 +52,7 @@ fn main() {
                     }
                 }
                 Some(_) => {}
-                None => {
-                    fatal = Some("未找到 mihomo.exe，请在 tray.yml 中设置 mihomo.path".to_string())
-                }
+                None => fatal = Some(i18n::t().error_kernel_not_found.to_string()),
             }
         }
     }
@@ -75,7 +78,7 @@ fn main() {
         match win::create_message_window(app) {
             Ok(hwnd) => (*app).hwnd = hwnd,
             Err(error) => {
-                win::fatal(&format!("启动失败: {error}"));
+                win::fatal(&i18n::t().error_window_create(&error));
                 std::process::exit(1);
             }
         }
