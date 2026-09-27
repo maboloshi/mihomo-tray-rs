@@ -175,7 +175,7 @@ SetMenuInfo(hmenu, &mi);
 ```
 Cargo.toml                  # windows-sys feature 精确到项；release profile 见 §2
 build.rs                    # 仅用于嵌入清单（或改用外部 .manifest，见 §9）
-src/main.rs                 # 单实例 → 加载设置 → 发现内核/控制器 → 建托盘 → 消息循环
+src/main.rs                 # 单实例 → 加载设置 → 建托盘 → 消息循环；内核交给后台线程
 src/win/mod.rs              # 隐藏消息窗口、WM_APP 分发、TaskbarCreated 重注册
 src/win/tray.rs             # Shell_NotifyIconW ADD/MODIFY/DELETE、tooltip、图标切换
 src/win/menu.rs             # 菜单构建、id 表、TrackPopupMenuEx、深色模式
@@ -186,11 +186,12 @@ src/mihomo/api.rs           # WinHTTP 客户端 + 上述端点
 src/mihomo/discover.rs      # §4 的三条发现链 + `-d <配置目录>`
 src/mihomo/proc.rs          # 启动/停止内核（只停路径匹配的 PID）+ 提权副本主体（按 PID 读映像/命令行）
 src/settings.rs             # tray.yml 读取（极简 YAML 子集）
-src/state.rs                # 状态结构 + 轮询线程 + 唤醒 UI
+src/state.rs                # 状态结构 + 内核路径/句柄槽 + 唤醒 UI
 src/icon.rs                 # RGBA → HICON（多尺寸、状态色）
 ```
 
 - **UI 线程**：创建窗口/托盘/菜单并跑 `GetMessageW` 循环。所有菜单操作必须在此线程（Win32 菜单线程亲和）。
+- **启动顺序**：先注册托盘图标（灰色）并立刻发一条「正在查找内核…」状态注记，发现控制器、拉起内核、等内核应答都在后台线程（等待上限 5 s）。探测的就是发现出来的控制器地址，而发现阶段本身也不许拖：默认端口**并行**探、每次 800 ms 短超时（`Client::alive` 自带），否则一个黑洞端口（接受连接却不答）或一台"被拒也要 2 s 才回"的机器就会把内核启动推后好几秒（实测本机：9091/9097/9098/6170 连不上也不拒绝、各耗满超时；被拒的回环连接也要 ~2 s；而成功探测预热后只要 1~3 ms、冷启首个连接约 400 ms，800 ms 是给冷启留的余量）。等待期间写 `Snapshot.status_note`，tooltip 与菜单显示「正在启动内核…」；预算内没应答就换成「内核尚未应答，仍在等待」并一直留着，直到控制器真的答话才清掉。内核慢启动因此只影响状态行，不再推迟图标出现。
 - **后台线程**：1 个轮询线程（默认 3 s，`stack_size(256 KB)`）拉 `/configs`，更新图标/tooltip，用 `PostMessageW(WM_APP+n)` 唤醒 UI；菜单项状态在下一次右键重建时同步更新。
 - **点击处理**：`TrackPopupMenuEx` 返回命令 id 后**同步**执行（写注册表/发 HTTP 都在本机回环，毫秒级）；HTTP 失败不弹窗，写进 tooltip 并在下一轮自然覆盖。
 
@@ -229,6 +230,7 @@ ui:
 ## 8. 状态与错误策略
 
 - 状态来源优先级：controller 实时值 > `tray.yml` > 默认值。`mixed-port` 从 `GET /configs` 取（系统代理指向它），不解析 yml。
+- 图标四态（优先序）：TUN=蓝 > 系统代理开=橙 > 内核可用=绿 > 控制器不可达=灰。注册表说系统代理开着但内核不应答时仍是灰——那才是这一刻真正要看见的状态；「内核可用」和两种接管方式是三件事，所以三个颜色。
 - 控制器不可达：状态行 `控制器不可达`，模式/TUN/分组项灰显；不自动重启内核（避免和外部管理方式打架），仅当 `mihomo.auto_start` 且进程确实不存在时才拉起。
 - TUN 开启后回读仍为 `false` → 内核没有管理员权限：启动自身的提权副本（`--kernel-start-elevated <pid>`）重启内核后重试；再失败则 tooltip 提示「TUN 未生效（通常需要管理员权限）」。取消 UAC 报「提权启动被取消或失败」，且此时旧内核还没被终止。
 - 提权副本只接受一个 PID，绝不接受路径或参数：映像与命令行都从那个进程读（`NtQueryInformationProcess(ProcessCommandLineInformation)`，见 §5），并且要求映像名是 `mihomo.exe`。否则副本就等于一个"UAC 弹窗写着本程序、实际以管理员身份运行任意程序"的提权原语；顺带这样也永远不用重建内核的启动参数（`-d`/`-f`/`-ext-ctl` 原样继承）。读不到命令行时报「无法读取内核自己的启动参数，未重启内核」并放弃本次重启。
@@ -289,6 +291,7 @@ ui:
 | 提权副本重启内核后，托盘仍持有旧内核的 `Child` 句柄，「退出并停止」会以为已经停掉 | 句柄只在 `try_wait()` 仍是 `Ok(None)`（进程还活着）时才算证据；内核身份改由「副本回传的 PID → 归一化路径 → 唯一不可读的那个」判定，不再维护句柄作废消息 |
 | 提权后的内核停不掉：托盘"成功退出"、提权 `mihomo.exe` 仍在 | 根因是路径比较：`current\mihomo.exe` 与进程报告的 `1.19.31\mihomo.exe` 永不相等（junction 在 CreateProcess 时被解析），旧代码因此落到"旧句柄兜底"或当作已停止。改为 `same_image` 归一化比较 + `denied ⇒ NeedsAdmin` + 副本按家族停止 |
 | `szTip` 可能无 NUL 终止 | 按 UTF-16 单元截断到 127 并留终止位 |
+| 用 `NOTIFYICON_VERSION_4` 后悬停**完全没有 tooltip**（菜单正常，故一直没被发现） | `NOTIFYICONDATAW.uFlags` 必须带 `NIF_SHOWTIP`：v4 下标准 tooltip 默认被抑制、让位给应用自绘弹窗（见 MS Learn `NOTIFYICONDATAW`）。`icon_data` 的 ADD/MODIFY 都带该标志 |
 | `mixed-port` 无检查强转 `u16`（70000 → 4464 并写进系统代理） | 越界过滤为 0 |
 | `CreateDIBSection` 部分失败时泄漏 `HBITMAP`；AND mask 未初始化 | 失败路径释放，mask 传零填充缓冲 |
 | 响应体无上限缓冲 | 8 MiB 上限，超出报「响应过大」 |
