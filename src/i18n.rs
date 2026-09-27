@@ -2,22 +2,23 @@
 //!
 //! Every label, status line and error message lives here instead of at its call
 //! site, so the UI language is a runtime choice rather than a property of the
-//! source. `zh-CN` is built in and is the default.
+//! source. `zh-CN` is built in and is the default, `en-US` is built in as well.
 //!
-//! A tag that names a `lang/<tag>.yml` next to `tray.yml` is layered on top of a
-//! built-in table, so a new language is one translated file and a key that file
-//! omits falls back to the built-in string instead of breaking the build.
+//! The language follows the Windows UI language and there is no setting for it:
+//! the tag itself (`zh-CN`, `ja-JP`, …) names the `lang/<tag>.yml` file to look
+//! for next to `tray.yml`. That file is layered on top of a built-in table, so a
+//! new language is one translated file and a key the file omits falls back to a
+//! built-in string instead of breaking the build.
 //!
 //! Values are `Cow<'static, str>`: a built-in string stays borrowed (no
 //! allocation, still a plain `&str` for `AppendMenuW`) while a translated one is
 //! owned. Both live in the same table, so no call site has to care which it got.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
+use windows_sys::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
 
 /// Declares the message table. The built-in tables, the file loader and the test
 /// accessor are all generated from this one list, so a string cannot be defined
@@ -231,8 +232,8 @@ impl Messages {
     }
 }
 
-/// The built-in table. Strings here are the ones this code used to carry inline;
-/// keep them byte-identical when editing, and edit `lang/en-US.yml` alongside.
+/// The built-in tables. Strings here are the ones this code used to carry
+/// inline; treat every value as a released interface, not a scratch string.
 impl Messages {
     fn zh_cn() -> Self {
         Self {
@@ -293,6 +294,83 @@ impl Messages {
             error_set_proxy_override_tpl: Cow::Borrowed("设置 ProxyOverride 失败: {error}"),
         }
     }
+
+    /// The built-in English table. `lang/en-US.yml` ships the same strings so a
+    /// translator has a starting point; keep the two in step, the
+    /// `shipped_template_matches_the_builtin_table` test fails otherwise.
+    fn en_us() -> Self {
+        Self {
+            menu_system_proxy: Cow::Borrowed("System proxy"),
+            menu_mode: Cow::Borrowed("Proxy mode"),
+            menu_mode_rule: Cow::Borrowed("Rule"),
+            menu_mode_global: Cow::Borrowed("Global"),
+            menu_mode_direct: Cow::Borrowed("Direct"),
+            menu_tun: Cow::Borrowed("TUN mode"),
+            menu_groups: Cow::Borrowed("Proxy groups"),
+            menu_group_label_tpl: Cow::Borrowed("{name} ({kind})"),
+            menu_group_label_pinned_tpl: Cow::Borrowed("{name} ({kind} · pinned)"),
+            menu_unfix: Cow::Borrowed("Automatic (unpin)"),
+            menu_truncated: Cow::Borrowed("(too many items, omitted)"),
+            menu_empty: Cow::Borrowed("(empty)"),
+            menu_autostart: Cow::Borrowed("Start with Windows"),
+            menu_reload: Cow::Borrowed("Reload config"),
+            menu_restart_admin: Cow::Borrowed("Restart as administrator"),
+            menu_exit: Cow::Borrowed("Exit"),
+            menu_exit_stop_kernel: Cow::Borrowed("Exit and stop Mihomo"),
+            menu_exit_only: Cow::Borrowed("Exit only"),
+
+            status_running_tpl: Cow::Borrowed("Mihomo status: running ({mode})"),
+            status_controller_unreachable: Cow::Borrowed(
+                "Mihomo status: kernel running, controller unreachable",
+            ),
+            status_stopped: Cow::Borrowed("Mihomo status: not running"),
+            state_on: Cow::Borrowed("on"),
+            state_off: Cow::Borrowed("off"),
+            tooltip_kernel_tpl: Cow::Borrowed("Kernel: mihomo {version}"),
+            tooltip_proxy_tun_tpl: Cow::Borrowed("System proxy: {proxy} · TUN: {tun}"),
+            tooltip_port_tpl: Cow::Borrowed("Port: {port}"),
+
+            error_kernel_not_found: Cow::Borrowed(
+                "mihomo.exe not found; set mihomo.path in tray.yml",
+            ),
+            error_read_settings_tpl: Cow::Borrowed("Failed to read {path}: {error}"),
+            error_window_create_tpl: Cow::Borrowed("Startup failed: {error}"),
+            error_no_kernel_path: Cow::Borrowed(
+                "No mihomo.exe path is known, cannot tell which process to stop",
+            ),
+            error_no_matching_kernel: Cow::Borrowed(
+                "No mihomo process matches this program's configuration",
+            ),
+            error_spawn_worker_tpl: Cow::Borrowed("Failed to start the polling thread: {error}"),
+            error_controller_unreachable_tpl: Cow::Borrowed(
+                "Controller {address} unreachable: {error}",
+            ),
+            error_winhttp_open: Cow::Borrowed("WinHttpOpen failed"),
+            error_request_failed: Cow::Borrowed("Request failed"),
+            error_response_too_large: Cow::Borrowed("Response too large (over 8 MiB)"),
+            error_http_request_failed: Cow::Borrowed("HTTP request failed"),
+            error_json_parse_tpl: Cow::Borrowed("JSON parse failed: {error}"),
+            error_start_process_tpl: Cow::Borrowed("Failed to start {path}: {error}"),
+            error_open_process_tpl: Cow::Borrowed("Cannot open process {pid}"),
+            error_kill_process_tpl: Cow::Borrowed("Failed to stop process {pid}"),
+            error_open_run_key_tpl: Cow::Borrowed("Failed to open the Run key: {error}"),
+            error_current_exe_tpl: Cow::Borrowed("Failed to get the program path: {error}"),
+            error_write_autostart_tpl: Cow::Borrowed(
+                "Failed to write the autostart entry: {error}",
+            ),
+            error_delete_autostart_tpl: Cow::Borrowed(
+                "Failed to delete the autostart entry: {error}",
+            ),
+            error_elevate_cancelled: Cow::Borrowed("Elevation was cancelled or failed"),
+            error_message_window: Cow::Borrowed("Failed to create the message window"),
+            error_open_internet_settings_tpl: Cow::Borrowed(
+                "Failed to open Internet Settings: {error}",
+            ),
+            error_set_proxy_enable_tpl: Cow::Borrowed("Failed to set ProxyEnable: {error}"),
+            error_set_proxy_server_tpl: Cow::Borrowed("Failed to set ProxyServer: {error}"),
+            error_set_proxy_override_tpl: Cow::Borrowed("Failed to set ProxyOverride: {error}"),
+        }
+    }
 }
 
 static MESSAGES: OnceLock<Messages> = OnceLock::new();
@@ -307,17 +385,21 @@ pub fn t() -> &'static Messages {
 ///
 /// Called first thing in `main`: code that runs later reports failures through
 /// this table, so the language has to be settled before anything can fail.
-/// Nothing selects the tag yet — it follows the Windows UI language, which is
-/// exactly what a `ui.language: auto` setting would mean.
 pub fn init() {
-    let _ = MESSAGES.set(resolve(system_tag()));
+    let _ = MESSAGES.set(resolve(&system_tag()));
 }
 
 fn resolve(tag: &str) -> Messages {
-    match read_language_file(tag) {
+    resolve_in(&language_dir(), tag)
+}
+
+/// The testable core of [`resolve`]: the directory is a parameter so a test can
+/// point at a scratch file instead of the real `tray.yml` directory.
+fn resolve_in(dir: &Path, tag: &str) -> Messages {
+    match read_language_file(dir, tag) {
         Some(translated) => {
             let mut messages = fallback();
-            messages.overlay(&|key| translated.get(key).cloned());
+            messages.overlay(&|key| lookup(&translated, key));
             messages
         }
         None => builtin(tag),
@@ -326,29 +408,48 @@ fn resolve(tag: &str) -> Messages {
 
 /// The table a language file is layered on: a translation may cover only part of
 /// the UI, and every key it leaves out comes from here rather than showing up
-/// blank. Deliberately independent of `tag`, so the same key is missing in the
-/// same way whichever file is incomplete.
+/// blank. Deliberately independent of `tag`, so a key is missing in the same way
+/// whichever file is incomplete.
 fn fallback() -> Messages {
-    Messages::zh_cn()
+    Messages::en_us()
 }
 
-/// The table compiled in for `tag`. An unknown tag falls back to the default, so
-/// a typo in a language name degrades to a working UI instead of an empty one.
-fn builtin(_tag: &str) -> Messages {
-    Messages::zh_cn()
-}
-
-/// `auto`: follow the Windows UI language. Anything Chinese (simplified or
-/// traditional) uses the default table, everything else English.
-fn system_tag() -> &'static str {
-    /// `LANG_CHINESE`, the primary language of the `LANGID`'s low ten bits.
-    const LANG_CHINESE: u16 = 0x04;
-    let language = unsafe { GetUserDefaultUILanguage() };
-    if language & 0x3ff == LANG_CHINESE {
-        "zh-CN"
-    } else {
-        "en-US"
+/// The table compiled in for `tag`, matched on the primary language so `en-GB`
+/// finds the English table. Anything unrecognised falls back to the default, so
+/// an unsupported language degrades to a working UI instead of an empty one.
+fn builtin(tag: &str) -> Messages {
+    match tag.split(['-', '_']).next().unwrap_or_default() {
+        "en" => Messages::en_us(),
+        _ => Messages::zh_cn(),
     }
+}
+
+/// The tag of the default table, and the answer when Windows cannot report a UI
+/// language at all.
+const DEFAULT_TAG: &str = "zh-CN";
+
+/// The Windows UI language as a BCP-47 tag such as `zh-CN` or `ja-JP`. The tag
+/// doubles as the language-file name, so a translation is picked up by naming it
+/// after the language Windows already runs in.
+fn system_tag() -> String {
+    /// `LOCALE_NAME_MAX_LENGTH`, the documented maximum for a locale name.
+    const LOCALE_NAME_MAX_LENGTH: usize = 85;
+    let langid = unsafe { GetUserDefaultUILanguage() };
+    // An LCID is a LANGID in the default sort order, and `SORT_DEFAULT` is zero.
+    let mut buffer = [0u16; LOCALE_NAME_MAX_LENGTH];
+    let len = unsafe {
+        LCIDToLocaleName(
+            u32::from(langid),
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            0,
+        )
+    };
+    if len <= 1 {
+        return DEFAULT_TAG.to_string();
+    }
+    // `len` counts the terminating NUL, which is not part of the name.
+    String::from_utf16_lossy(&buffer[..len as usize - 1])
 }
 
 /// The directory scanned for `lang/<tag>.yml`: the one that holds `tray.yml`, so
@@ -361,11 +462,25 @@ fn language_dir() -> PathBuf {
         .join("lang")
 }
 
-/// Read `lang/<tag>.yml`. `None` means "no such file", which selects the
-/// built-in table.
-fn read_language_file(tag: &str) -> Option<HashMap<String, String>> {
-    let text = std::fs::read_to_string(language_dir().join(format!("{tag}.yml"))).ok()?;
+/// Read `lang/<tag>.yml` from `dir`. `None` means "no such file", which selects
+/// the built-in table.
+fn read_language_file(dir: &Path, tag: &str) -> Option<Vec<(String, String)>> {
+    let text = std::fs::read_to_string(dir.join(format!("{tag}.yml"))).ok()?;
     Some(parse_language_file(&text))
+}
+
+/// The value for `key`, or `None` when the file does not define it. Later lines
+/// win, which is how an override added at the bottom of a file is read.
+///
+/// A linear scan is deliberate: the table has a few dozen entries and is read
+/// once at startup, and a `HashMap` would drag hashing and table code into a
+/// binary that is measured in kilobytes.
+fn lookup(entries: &[(String, String)], key: &str) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.clone())
 }
 
 /// Parse the deliberately tiny language-file format:
@@ -381,8 +496,8 @@ fn read_language_file(tag: &str) -> Option<HashMap<String, String>> {
 /// reused here: it treats a `#` after a space as a comment and an unmatched
 /// quote as an open string, which silently truncates translations such as
 /// `Proxy #1` and swallows the rest of the line after an apostrophe in `don't`.
-fn parse_language_file(text: &str) -> HashMap<String, String> {
-    let mut entries = HashMap::new();
+fn parse_language_file(text: &str) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = Vec::new();
     let mut section = String::new();
     for raw in text.lines() {
         let content = raw.trim();
@@ -401,7 +516,7 @@ fn parse_language_file(text: &str) -> HashMap<String, String> {
         // An empty value is a mistake, not a translation; treating it as absent
         // keeps a blank line in the file from blanking a menu item.
         if !value.is_empty() {
-            entries.insert(format!("{section}.{key}"), value);
+            entries.push((format!("{section}.{key}"), value));
         }
     }
     entries
@@ -411,11 +526,85 @@ fn parse_language_file(text: &str) -> HashMap<String, String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn builtin_table_has_no_empty_string() {
-        for (key, value) in Messages::zh_cn().entries() {
-            assert!(!value.trim().is_empty(), "{key} is empty");
+    /// `{hole}` names in a template, in order.
+    fn holes(text: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find('{') {
+            let Some(end) = rest[start..].find('}') else {
+                break;
+            };
+            found.push(rest[start + 1..start + end].to_string());
+            rest = &rest[start + end + 1..];
         }
+        found
+    }
+
+    #[test]
+    fn builtin_tables_agree_on_keys_and_holes() {
+        let zh_messages = Messages::zh_cn();
+        let en_messages = Messages::en_us();
+        let zh = zh_messages.entries();
+        let en = en_messages.entries();
+        assert_eq!(zh.len(), en.len());
+        for ((key, zh_value), (en_key, en_value)) in zh.iter().zip(&en) {
+            assert_eq!(key, en_key);
+            assert!(!zh_value.trim().is_empty(), "{key} is empty in zh-CN");
+            assert!(!en_value.trim().is_empty(), "{key} is empty in en-US");
+            assert_eq!(holes(zh_value), holes(en_value), "{key} holes differ");
+        }
+    }
+
+    #[test]
+    fn shipped_template_matches_the_builtin_table() {
+        let template = parse_language_file(include_str!("../lang/en-US.yml"));
+        let en_messages = Messages::en_us();
+        let builtin = en_messages.entries();
+        assert_eq!(template.len(), builtin.len());
+        for (key, value) in builtin {
+            assert_eq!(lookup(&template, key).as_deref(), Some(value), "{key}");
+        }
+    }
+
+    #[test]
+    fn system_tag_looks_like_a_language_tag() {
+        // Exercises the Win32 call: a bad `LCID` leaves the buffer empty and the
+        // tag would then never match any file name.
+        let tag = system_tag();
+        let mut chars = tag.chars();
+        assert!(
+            chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                && chars.next().is_some_and(|c| c.is_ascii_alphabetic()),
+            "{tag:?} is not a language tag"
+        );
+    }
+
+    #[test]
+    fn builtin_matches_the_language_not_the_region() {
+        assert_eq!(builtin("en-GB").menu_exit.to_string(), "Exit");
+        assert_eq!(builtin("en_US").menu_exit.to_string(), "Exit");
+        assert_eq!(builtin("en").menu_exit.to_string(), "Exit");
+        // Unsupported languages keep the default table rather than an empty UI.
+        assert_eq!(builtin("ja-JP").menu_exit.to_string(), "退出");
+        assert_eq!(builtin("zh-TW").menu_exit.to_string(), "退出");
+    }
+
+    #[test]
+    fn a_language_file_is_layered_on_the_fallback() {
+        let dir = std::env::temp_dir().join(format!("mihomo-tray-i18n-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch language directory");
+        let file = dir.join("ja-JP.yml");
+        std::fs::write(&file, "# scratch\nmenu:\n  exit: 終了\n").expect("write scratch file");
+
+        let messages = resolve_in(&dir, "ja-JP");
+        assert_eq!(messages.menu_exit.to_string(), "終了");
+        // Keys the file omits come from the fallback table, not from nothing.
+        assert_eq!(messages.menu_reload.to_string(), "Reload config");
+        // A tag with no file at all keeps the built-in default.
+        assert_eq!(resolve_in(&dir, "de-DE").menu_exit.to_string(), "退出");
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
@@ -441,10 +630,10 @@ mod tests {
         let parsed = parse_language_file(
             "# comment\nmenu:\n  system_proxy: Proxy #1\n  empty: don't stop\nother:\n  k: a: b\n",
         );
-        assert_eq!(parsed.get("menu.system_proxy").unwrap(), "Proxy #1");
-        assert_eq!(parsed.get("menu.empty").unwrap(), "don't stop");
+        assert_eq!(lookup(&parsed, "menu.system_proxy").unwrap(), "Proxy #1");
+        assert_eq!(lookup(&parsed, "menu.empty").unwrap(), "don't stop");
         // `# comment` on its own line is dropped, and only the first `:` splits.
-        assert_eq!(parsed.get("other.k").unwrap(), "a: b");
+        assert_eq!(lookup(&parsed, "other.k").unwrap(), "a: b");
         assert_eq!(parsed.len(), 3);
     }
 
@@ -456,7 +645,7 @@ mod tests {
             parse_language_file("menu:\n  tun: TUN mode\n  reload:\n  groups: \"\"\nnope\n");
         assert_eq!(parsed.len(), 1);
         let mut messages = Messages::zh_cn();
-        messages.overlay(&|key| parsed.get(key).cloned());
+        messages.overlay(&|key| lookup(&parsed, key));
         assert_eq!(messages.menu_tun, "TUN mode");
         assert_eq!(messages.menu_reload, "重载配置");
         assert_eq!(messages.menu_groups, "代理分组");
@@ -466,7 +655,7 @@ mod tests {
     fn overlay_keeps_keys_the_file_omits() {
         let mut messages = Messages::zh_cn();
         let file = parse_language_file("menu:\n  tun: TUN mode\n");
-        messages.overlay(&|key| file.get(key).cloned());
+        messages.overlay(&|key| lookup(&file, key));
         assert_eq!(messages.menu_tun, "TUN mode");
         assert_eq!(messages.menu_reload, "重载配置");
     }

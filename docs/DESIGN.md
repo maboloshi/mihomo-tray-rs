@@ -3,7 +3,7 @@
 Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/MetaCubeX/mihomo) 内核与其系统级代理设置。
 目标：**二进制小、内存小、依赖少**（不使用 UPX 等压缩手段），功能以「托盘能做的操作」为边界，不复刻 Clash for Windows 的完整界面。
 
-- 界面文案：中文（与既有 `mihomo-tray` Go 版一致）
+- 界面文案：走 `src/i18n.rs` 的语言表，默认中文（与既有 `mihomo-tray` Go 版一致），另内置英文；使用者可用 `lang/<系统语言>.yml` 覆盖，见 [README](../README.md) 的「界面语言」
 - 代码注释 / commit / 本仓库文档语言：见 §11
 
 ---
@@ -242,8 +242,10 @@ ui:
 2. **worker 先刷新再等待**：原实现先 `recv_timeout(poll)` 再刷新，导致首个菜单（3 s 前打开）显示空状态；现改为循环开头立刻刷新，实现中实测发现并修复。
 3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`，无资源文件、无图像库。
 4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
-5. **实测体积/内存**：exe 328 KB，空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
-6. **单测 19 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理。
+5. **实测体积/内存**：exe 362 KB（i18n 之前 338 KB，增量见 §11.7），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
+6. **单测 30 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退。
+7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（51 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
+   **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB），远高于动工前估的 3–4 KB——语言表本体、51 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（51 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
 
 ### 代码审查修复（第二轮，10 项 must-fix + 若干 should-fix）
 
