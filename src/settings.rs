@@ -146,7 +146,7 @@ pub fn ensure_default_file(path: &Path) {
 fn parse(text: &str) -> Settings {
     let mut s = Settings::default();
     let mut section = String::new();
-    for raw in text.lines() {
+    for raw in strip_bom(text).lines() {
         let line = strip_comment(raw);
         if line.trim().is_empty() {
             continue;
@@ -194,8 +194,21 @@ fn parse(text: &str) -> Settings {
     s
 }
 
+/// Drop a leading UTF-8 BOM, which a Windows editor may well have written.
+///
+/// Neither parser would otherwise recognise the first line: it would become a
+/// section named `\u{feff}mihomo` (or `\u{feff}menu`) and every key under it
+/// would be silently ignored — the whole file, effectively.
+pub(crate) fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// Drop a trailing `#` comment that is outside quotes. Shared with the mihomo
 /// config reader so `secret: "tok#en"` survives there too.
+///
+/// A quote only opens where the same quote closes later in the line: an
+/// apostrophe in an unquoted scalar (`don't`) is punctuation, not the start of a
+/// quoted string, and treating it as one would swallow the comment after it.
 pub(crate) fn strip_comment(line: &str) -> &str {
     let mut quote: Option<char> = None;
     let mut prev = ' ';
@@ -207,7 +220,7 @@ pub(crate) fn strip_comment(line: &str) -> &str {
                 }
             }
             None => match c {
-                '\'' | '"' => quote = Some(c),
+                '\'' | '"' if line[i + c.len_utf8()..].contains(c) => quote = Some(c),
                 '#' if prev.is_whitespace() => return &line[..i],
                 _ => {}
             },
@@ -215,6 +228,30 @@ pub(crate) fn strip_comment(line: &str) -> &str {
         prev = c;
     }
     line
+}
+
+/// Split the items of an inline list on the commas that separate them, ignoring
+/// the ones inside a quoted item (`["a,b"]` is one entry).
+fn split_items(inner: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut quote: Option<char> = None;
+    for (i, c) in inner.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' if inner[i + c.len_utf8()..].contains(c) => quote = Some(c),
+                ',' => {
+                    items.push(&inner[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    items.push(&inner[start..]);
+    items
 }
 
 /// Strip one matching pair of surrounding quotes. Shared with the language-file
@@ -251,8 +288,8 @@ fn parse_list(v: &str) -> Vec<String> {
             vec![one]
         };
     };
-    inner
-        .split(',')
+    split_items(inner)
+        .into_iter()
         .map(unquote)
         .filter(|item| !item.is_empty())
         .collect()
@@ -315,5 +352,30 @@ ui:
         let (s, err) = load(Path::new(r"Z:\definitely\missing\tray.yml"));
         assert!(err.is_none());
         assert_eq!(s.poll_interval_ms, 3000);
+    }
+
+    #[test]
+    fn a_bom_does_not_hide_the_first_section() {
+        // A file saved by a Windows editor may start with a BOM; without skipping
+        // it the first section is called `\u{feff}mihomo` and its keys are lost.
+        let text = format!("\u{feff}{}", DEFAULT_FILE);
+        let s = parse(&text);
+        assert_eq!(s.controller_timeout_ms, 2000);
+        assert_eq!(s.poll_interval_ms, 3000);
+    }
+
+    #[test]
+    fn an_apostrophe_does_not_hide_the_comment_behind_it() {
+        let s = parse("controller:\n  secret: don't tell   # not part of the secret\n");
+        assert_eq!(s.controller_secret, "don't tell");
+        // A `#` with no space in front of it is still part of the value.
+        let s = parse("controller:\n  secret: tok#en\n");
+        assert_eq!(s.controller_secret, "tok#en");
+    }
+
+    #[test]
+    fn a_comma_inside_quotes_stays_in_its_item() {
+        let s = parse("proxy:\n  bypass: [\"a,b\", c]\n");
+        assert_eq!(s.proxy_bypass, vec!["a,b", "c"]);
     }
 }

@@ -548,7 +548,7 @@ fn lookup(entries: &[(String, String)], key: &str) -> Option<String> {
 fn parse_language_file(text: &str) -> Vec<(String, String)> {
     let mut entries: Vec<(String, String)> = Vec::new();
     let mut section = String::new();
-    for raw in text.lines() {
+    for raw in crate::settings::strip_bom(text).lines() {
         let content = raw.trim();
         if content.is_empty() || content.starts_with('#') {
             continue;
@@ -684,6 +684,15 @@ mod tests {
         // `# comment` on its own line is dropped, and only the first `:` splits.
         assert_eq!(lookup(&parsed, "other.k").unwrap(), "a: b");
         assert_eq!(parsed.len(), 3);
+    }
+
+    #[test]
+    fn a_bom_does_not_hide_the_first_section() {
+        // Translators edit these files on Windows editors that may add a BOM;
+        // without skipping it every key would carry it and no translation would
+        // ever be found.
+        let parsed = parse_language_file("\u{feff}menu:\n  exit: 終了\n");
+        assert_eq!(lookup(&parsed, "menu.exit").as_deref(), Some("終了"));
     }
 
     #[test]
