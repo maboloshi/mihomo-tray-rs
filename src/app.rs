@@ -252,7 +252,11 @@ const KERNEL_STARTUP_BUDGET: Duration = Duration::from_secs(5);
 struct Worker<'a> {
     /// The controller to talk to. `None` while none could be resolved: the kernel
     /// can still be started and stopped, but nothing that needs the controller is.
-    client: Option<&'a Client>,
+    ///
+    /// Owned rather than borrowed: a restarted kernel is a different process, and
+    /// the controller has to be resolved again from the one running afterwards.
+    /// A borrow of what startup found would pin the session to the first kernel.
+    client: Option<Client>,
     state: &'a Shared,
     hwnd: isize,
     /// The kernel this program may start or replace.
@@ -363,7 +367,7 @@ fn spawn_worker(
         .spawn(move || {
             let startup = startup(&kernel, &settings, &state, hwnd);
             let worker = Worker {
-                client: startup.client.as_ref(),
+                client: startup.client,
                 state: &state,
                 hwnd,
                 kernel: &kernel,
@@ -384,7 +388,7 @@ fn spawn_worker(
                 // kernel answers.
                 state::write_kernel_started(&state, i18n::t().status_starting_kernel.to_string());
                 post(hwnd, win::WM_REFRESH);
-                if wait_for_controller(worker.client) {
+                if wait_for_controller(worker.client.as_ref()) {
                     show_note(&state, hwnd, None);
                 } else {
                     show_note(
@@ -400,7 +404,7 @@ fn spawn_worker(
                 // Refresh first so the very first menu the user opens already has
                 // real data, then wait either for a command or the poll interval.
                 refresh(
-                    worker.client,
+                    worker.client.as_ref(),
                     &settings.web_url,
                     &state,
                     &mut version,
@@ -428,7 +432,7 @@ fn spawn_worker(
 }
 
 fn execute(worker: &Worker, command: &Command) -> Option<String> {
-    let Some(client) = worker.client else {
+    let Some(client) = worker.client.as_ref() else {
         // Without a controller the two process commands are still worth carrying
         // out; everything else can only answer that there is nothing to talk to.
         return match command {
@@ -461,7 +465,7 @@ fn execute(worker: &Worker, command: &Command) -> Option<String> {
 fn set_tun(worker: &Worker, enable: bool) -> Option<String> {
     // TUN is a controller setting and is read back from the controller, so
     // without one there is nothing here that could be told it worked.
-    let Some(client) = worker.client else {
+    let Some(client) = worker.client.as_ref() else {
         return Some(i18n::t().error_controller_unset.to_string());
     };
     if !enable {
