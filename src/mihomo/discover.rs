@@ -126,6 +126,12 @@ fn kernel_config(settings: &Settings) -> Result<Option<PathBuf>, String> {
 /// owned by `tray.yml` is refused: the kernel would obey the argument while this
 /// program read the setting, and the two would disagree without saying so.
 pub fn launch_args(settings: &Settings) -> Result<Vec<String>, String> {
+    launch_args_with(settings, override_environment())
+}
+
+/// The command line itself, with the controller environment handed in — the
+/// caller reads it, so a test does not depend on this machine's variables.
+fn launch_args_with(settings: &Settings, env: ControllerSettings) -> Result<Vec<String>, String> {
     for (flag, field) in [
         ("d", "mihomo.home"),
         ("f", "mihomo.config"),
@@ -149,7 +155,31 @@ pub fn launch_args(settings: &Settings) -> Result<Vec<String>, String> {
         args.push("-f".to_string());
         args.push(config.display().to_string());
     }
+    args.extend(override_args(&env));
     Ok(args)
+}
+
+/// The `CLASH_OVERRIDE_*` variables written out as kernel arguments: `-ext-ctl`
+/// and `-secret`.
+///
+/// Those variables are the defaults of exactly these flags, so writing them out
+/// is the same instruction to the kernel — but a written-out value is the one that
+/// survives. The elevated helper restarts the kernel from its old command line,
+/// while nothing that goes through UAC inherits this program's environment
+/// (measured: the helper sees neither `CLASH_HOME_DIR` nor `CLASH_OVERRIDE_*`).
+/// Deciding the value here is what keeps a TUN-elevated kernel on the controller
+/// this program resolved.
+fn override_args(env: &ControllerSettings) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(address) = &env.address {
+        args.push("-ext-ctl".to_string());
+        args.push(address.clone());
+    }
+    if let Some(secret) = &env.secret {
+        args.push("-secret".to_string());
+        args.push(secret.clone());
+    }
+    args
 }
 
 /// Whether the arguments already carry a Go-style flag: `-d`, `--d`, `-d=…`,
@@ -209,6 +239,15 @@ fn controller_from_config(path: &Path) -> std::io::Result<ControllerFile> {
 /// is what a kernel started from here inherits; a kernel started elsewhere may
 /// have been given another one, and that is the one case this cannot see.
 pub fn find_controller(settings: &Settings) -> Result<Client, String> {
+    find_controller_with(settings, override_environment())
+}
+
+/// The resolution itself, with the controller environment handed in — the caller
+/// reads it, so a test does not depend on this machine's variables.
+fn find_controller_with(
+    settings: &Settings,
+    from_env: ControllerSettings,
+) -> Result<Client, String> {
     let config = kernel_config(settings)?;
     let args = kernel_arguments(config.as_deref());
     let file = config.as_deref().map(controller_from_config);
@@ -216,10 +255,6 @@ pub fn find_controller(settings: &Settings) -> Result<Client, String> {
     let from_argv = ControllerSettings {
         address: flag_value(args.as_deref().unwrap_or_default(), "ext-ctl"),
         secret: flag_value(args.as_deref().unwrap_or_default(), "secret"),
-    };
-    let from_env = ControllerSettings {
-        address: env_setting("CLASH_OVERRIDE_EXTERNAL_CONTROLLER"),
-        secret: env_setting("CLASH_OVERRIDE_SECRET"),
     };
     let from_file = match &file {
         Some(Ok(file)) => file.settings.clone(),
@@ -282,6 +317,16 @@ fn unresolved(config: Option<&Path>, file: Option<&std::io::Result<ControllerFil
 /// A `CLASH_OVERRIDE_*` variable, as mihomo reads it: an empty one is not a value.
 fn env_setting(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// The `CLASH_OVERRIDE_*` variables: mihomo makes them the defaults of `-ext-ctl`
+/// and `-secret`, which is why they belong to the same slot in the chain rather
+/// than to a source of their own.
+fn override_environment() -> ControllerSettings {
+    ControllerSettings {
+        address: env_setting("CLASH_OVERRIDE_EXTERNAL_CONTROLLER"),
+        secret: env_setting("CLASH_OVERRIDE_SECRET"),
+    }
 }
 
 /// A setting from `tray.yml`, where empty means "not set" rather than "the empty
@@ -603,7 +648,7 @@ mod tests {
             controller_secret: "tok".into(),
             ..Settings::default()
         };
-        let client = find_controller(&settings).unwrap();
+        let client = find_controller_with(&settings, ControllerSettings::default()).unwrap();
         assert_eq!(client.address(), "127.0.0.1:1234");
         assert_eq!(client.secret, "tok");
     }
@@ -615,7 +660,7 @@ mod tests {
             mihomo_config: path.display().to_string(),
             ..Settings::default()
         };
-        let error = find_controller(&settings).unwrap_err();
+        let error = find_controller_with(&settings, ControllerSettings::default()).unwrap_err();
         assert!(error.contains("external-controller"), "{error}");
     }
 
@@ -629,7 +674,7 @@ mod tests {
             mihomo_config: path.display().to_string(),
             ..Settings::default()
         };
-        let error = find_controller(&settings).unwrap_err();
+        let error = find_controller_with(&settings, ControllerSettings::default()).unwrap_err();
         assert!(error.contains("TLS/unix/pipe"), "{error}");
     }
 
@@ -673,7 +718,7 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(
-            launch_args(&settings).unwrap(),
+            launch_args_with(&settings, ControllerSettings::default()).unwrap(),
             vec![
                 "-m".to_string(),
                 "-d".to_string(),
@@ -693,7 +738,7 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(
-            launch_args(&settings).unwrap(),
+            launch_args_with(&settings, ControllerSettings::default()).unwrap(),
             vec![
                 "-d".to_string(),
                 dir.display().to_string(),
@@ -701,6 +746,42 @@ mod tests {
                 file.display().to_string(),
             ]
         );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn the_controller_environment_is_written_onto_the_command_line() {
+        // `CLASH_OVERRIDE_*` is the default of `-ext-ctl`/`-secret`, so writing it
+        // out says the same thing to the kernel — and being written out is what
+        // makes it survive the elevated restart, which inherits no environment.
+        let (dir, file) = scratch("env.yaml");
+        let settings = Settings {
+            mihomo_config: file.display().to_string(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            launch_args_with(
+                &settings,
+                source(Some("127.0.0.1:9095"), Some("testsecret")),
+            )
+            .unwrap(),
+            vec![
+                "-d".to_string(),
+                dir.display().to_string(),
+                "-f".to_string(),
+                file.display().to_string(),
+                "-ext-ctl".to_string(),
+                "127.0.0.1:9095".to_string(),
+                "-secret".to_string(),
+                "testsecret".to_string(),
+            ]
+        );
+        // Each variable stands on its own, and an unset one adds nothing.
+        assert_eq!(
+            override_args(&source(None, Some("tok"))),
+            vec!["-secret".to_string(), "tok".to_string()]
+        );
+        assert_eq!(override_args(&source(None, None)), Vec::<String>::new());
         let _ = std::fs::remove_file(&file);
     }
 

@@ -133,7 +133,7 @@ SetMenuInfo(hmenu, &mi);
 
 - **逐字段**：mihomo 侧某字段没设置或读不到，才用 `tray.yml` 的同名字段；`controller.*` 是兜底而非覆盖（旧实现反过来，会把内核的设置架空）。
 - 选哪个内核的 argv：被明确告知读**同一份配置文件**的那个；只有一个 `mihomo.exe` 时就是它；其余情况（多个、都读别的文件）不猜，直接跳过这一来源。相对 `-f`/`-d` 无法解析（要读别的进程的 CWD）→ 同样视为"不可知"。
-- 本程序启动内核时**总是**显式传 `-d`/`-f`（绝对路径），并拒绝 `mihomo.args` 里的 `-d`/`-f`/`-ext-ctl`/`-secret`（同一设置两处写法 → 内核与托盘读到的文件会不同）；工作目录设为 `mihomo.exe` 所在目录，让 args 里的相对路径有确定基准。
+- 本程序启动内核时**总是**显式传 `-d`/`-f`（绝对路径），并拒绝 `mihomo.args` 里的 `-d`/`-f`/`-ext-ctl`/`-secret`（同一设置两处写法 → 内核与托盘读到的文件会不同）；工作目录设为 `mihomo.exe` 所在目录，让 args 里的相对路径有确定基准。环境里的 `CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET` 同样在启动时**具体化成 `-ext-ctl`/`-secret`**（它们是这两个 flag 的默认值，写出来语义不变），因为 UAC 不传环境而提权副本只会复用命令行——这样 TUN 之后内核用的仍是这里解析出的那个控制器。
 - 内核没开 `external-controller`、或只开了 `-tls`/`-unix`/`-pipe`，都明确报出来。唯一看不到的情况：内核由别的启动器拉起、用 `-ext-ctl`/`-secret` 覆盖了配置、其命令行又读不到 → 报不可达，由 `controller.*` 兜底。
 
 ---
@@ -161,7 +161,7 @@ SetMenuInfo(hmenu, &mi);
 |---|---|---|
 | 进程映像路径是**解析后**的真实路径 | 用 junction 拼写启动 `apps\mihomo-v3\current\mihomo.exe`，进程报告 `apps\mihomo-v3\1.19.31\mihomo.exe`（`GetFinalPathNameByHandleW` 两种拼写解析结果一致） | 任何"路径即身份"的比较都必须 `canonicalize` + 忽略大小写（`proc::same_image`）；直接比字符串**永远不相等** |
 | scoop shim 也叫 `mihomo.exe` | 枚举里同时出现 shim 与真内核，且真内核是 shim 的**子进程**；按映像路径杀只会杀掉 shim | 停内核要按**父子家族**收敛（`proc::family`），不能只看名字或单个路径 |
-| `runas` 不继承调用者的进程环境 | 提权副本里看不到 `CLASH_HOME_DIR`、`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET` | 提权重启只能靠**内核自己的命令行**；只写在环境变量里的配置要挪进 `tray.yml`/`mihomo.args` |
+| `runas` 不继承调用者的进程环境 | 提权副本里看不到 `CLASH_HOME_DIR`、`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET` | 提权重启只能靠**内核自己的命令行**：所以 `-d`/`-f` 总是显式传，`CLASH_OVERRIDE_*` 也在启动内核时被具体化成 `-ext-ctl`/`-secret`（同一件事，但写得下来） |
 | `runas` 可能以**另一个账户**授权 | 凭据式授权时副本属于另一个用户，读/杀本账户的内核会被拒 | 固有边界，无解；这种机器上只能人工以管理员权限启动内核（§8 已知限制） |
 | 退出码是 32 位 | `GetExitCodeProcess` 拿得到完整值（`%ERRORLEVEL%`/`cmd` 会截断到 8 位） | 可用"正数 = PID、负数 = 错误"回传结果；**不要**改成"由调用者指定路径写文件"——那等于给低权限进程一个提权写文件原语 |
 | 高完整性级别进程：句柄能开、路径可能被拒 | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 成功，`QueryFullProcessImageNameW` 失败 | 这种进程记为**不可核验**，不能归进"不是我们的"——否则会得出"没有可停的了"的假结论 |
@@ -253,7 +253,7 @@ ui:
 - 系统代理：默认「退出时保持现状」（不保存原值、退出时不改写）；`ProxyOverride` **只在注册表里没有该值时才写入**（`bypass` + `<local>`），用户自己整理过的列表不会被覆盖。
 - **已知限制**（都由"只有内核需要提权"这一件事决定，不是缺陷）：
   - UAC 若用**另一个管理员账户**的凭据授权，副本以那个账户身份运行，读不到也停不掉本账户的内核（回 `-2`/`-5`）；这种机器上只能人工以管理员权限启动内核。
-  - 副本复用**内核自己的命令行**，所以"只存在于环境变量里"的配置（`CLASH_HOME_DIR`、`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET`）不会跟着提权过 UAC；要可靠就在 `tray.yml` 里写明 `mihomo.home`/`mihomo.config`，控制器用 `controller.*` 兜底（`mihomo.args` 不再接受 `-d`/`-f`/`-ext-ctl`/`-secret`）。
+  - 副本复用**内核自己的命令行**，所以"只存在于环境变量里"的配置能不能过 UAC，取决于它有没有被写进命令行：`-d`/`-f` 总是显式传，`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET` 在启动内核时被具体化成 `-ext-ctl`/`-secret`，因此这两类都跟得过去；`CLASH_HOME_DIR`/`CLASH_CONFIG_FILE` 则完全不参与（被显式 `-d`/`-f` 钉住）。只有"内核由别的启动器拉起"时托盘才可能读不到它的设置，那时用 `controller.*` 兜底（`mihomo.args` 不接受 `-d`/`-f`/`-ext-ctl`/`-secret`）。
   - 记录的 PID 只在本会话内有效（跨托盘重启靠路径身份兜底）；PID 号被复用的窗口极小，但仍以"它还在 `mihomo.exe` 列表里"为唯一校验。
   - 关闭 TUN **不回读**（开启必须回读）：静默失败只会表现为菜单勾选状态没变。
   - **控制器只按明文 http 访问**：`Client::new` 会去掉 `http://`/`https://` 前缀，WinHTTP 请求不带 `WINHTTP_FLAG_SECURE`。控制器在本机回环上时这不是问题（mihomo 的 `external-controller` 本身就是明文 http）；跨机需要加密时自行套隧道。
