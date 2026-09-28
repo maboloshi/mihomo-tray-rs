@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::api::Client;
+use super::api::{Client, ClientError};
 use super::proc;
 use crate::i18n;
 use crate::paths;
@@ -273,7 +273,12 @@ fn find_controller_with(
         &controller.secret,
         settings.controller_timeout_ms,
     )
-    .ok_or_else(|| i18n::t().error_controller_invalid(&controller.address))
+    .map_err(|error| match error {
+        // Two different things to fix, so they get two different messages: a typo,
+        // or a scheme this program does not speak.
+        ClientError::TlsUnsupported => i18n::t().error_controller_tls(&controller.address),
+        ClientError::NotAnAddress => i18n::t().error_controller_invalid(&controller.address),
+    })
 }
 
 /// The chain itself, with every source handed in. mihomo's precedence first, and
@@ -676,6 +681,21 @@ mod tests {
         };
         let error = find_controller_with(&settings, ControllerSettings::default()).unwrap_err();
         assert!(error.contains("TLS/unix/pipe"), "{error}");
+    }
+
+    /// An `https://` address names a controller this program has no client for.
+    /// The refusal is what keeps the scheme from being dropped and the request
+    /// from going out in plaintext.
+    #[test]
+    fn an_https_controller_is_refused_with_its_own_reason() {
+        let path = config_file("tls.yaml", "external-controller: https://127.0.0.1:9090\n");
+        let settings = Settings {
+            mihomo_config: path.display().to_string(),
+            ..Settings::default()
+        };
+        let error = find_controller_with(&settings, ControllerSettings::default()).unwrap_err();
+        assert!(error.contains("https"), "{error}");
+        assert!(!error.contains("host:port"), "{error}");
     }
 
     /// A scratch directory with a configuration file of a non-default name.

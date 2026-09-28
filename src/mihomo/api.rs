@@ -29,22 +29,40 @@ pub struct Client {
     pub timeout_ms: u32,
 }
 
+/// Why an address in `tray.yml` (or in the kernel's own settings) cannot be used.
+///
+/// The two cases are separate because they ask the user for different things: one
+/// is a typo, the other is a scheme this program deliberately does not speak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientError {
+    /// Not a `host:port` this program can build a request for.
+    NotAnAddress,
+    /// Written with an `https://` scheme. There is no TLS client here, so the
+    /// address is refused instead of being silently downgraded to a plaintext
+    /// request against a port that would not answer one.
+    TlsUnsupported,
+}
+
 impl Client {
-    /// Accepts `host:port` or `http://host:port`; returns `None` when unusable.
-    pub fn new(address: &str, secret: &str, timeout_ms: u32) -> Option<Self> {
-        let trimmed = address
-            .trim()
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .trim_end_matches('/');
-        let (host, port) = trimmed.rsplit_once(':')?;
+    /// Accepts `host:port` or `http://host:port`; rejects anything else, `https://`
+    /// included.
+    pub fn new(address: &str, secret: &str, timeout_ms: u32) -> Result<Self, ClientError> {
+        let written = address.trim();
+        // Checked before anything else, and by prefix rather than after stripping a
+        // scheme: without this the `://` would simply survive into the host, and a
+        // TLS controller would be talked to in plaintext.
+        if written.to_ascii_lowercase().starts_with("https://") {
+            return Err(ClientError::TlsUnsupported);
+        }
+        let trimmed = written.trim_start_matches("http://").trim_end_matches('/');
+        let (host, port) = trimmed.rsplit_once(':').ok_or(ClientError::NotAnAddress)?;
         let host = match host {
             "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
             other => other.trim_matches(|c| c == '[' || c == ']'),
         };
-        Some(Self {
+        Ok(Self {
             host: host.to_string(),
-            port: port.parse().ok()?,
+            port: port.parse().map_err(|_| ClientError::NotAnAddress)?,
             secret: secret.to_string(),
             timeout_ms: timeout_ms.max(200),
         })
@@ -376,7 +394,26 @@ mod tests {
         );
         let c = Client::new("0.0.0.0:9090", "", 2000).unwrap();
         assert_eq!(c.host, "127.0.0.1");
-        assert!(Client::new("no-port", "", 2000).is_none());
+        assert_eq!(
+            Client::new("no-port", "", 2000).unwrap_err(),
+            ClientError::NotAnAddress
+        );
+    }
+
+    #[test]
+    fn an_https_address_is_refused_rather_than_downgraded() {
+        // There is no TLS client here, and silently dropping the scheme would send
+        // a plaintext request to a port that answers TLS only.
+        assert_eq!(
+            Client::new("https://127.0.0.1:9090", "", 2000).unwrap_err(),
+            ClientError::TlsUnsupported
+        );
+        assert_eq!(
+            Client::new("  HTTPS://127.0.0.1:9090/", "", 2000).unwrap_err(),
+            ClientError::TlsUnsupported
+        );
+        // A scheme this program does speak is still accepted.
+        assert!(Client::new("http://127.0.0.1:9090", "", 2000).is_ok());
     }
 
     #[test]
