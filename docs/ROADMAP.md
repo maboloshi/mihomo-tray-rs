@@ -8,8 +8,8 @@ Phase 1（MVP）已实现并真机验证：
 
 - 9 项菜单功能（状态行 / 系统代理 / 代理模式 / TUN / 代理分组 / 开机自启动 / 重载配置 / 打开 Web 面板 / 退出两项）全部可用
 - 内核/配置/控制器都按 mihomo 自己的规则解析（`mihomo.path`/`home`/`config` + 运行内核的 argv → 环境变量 → 配置文件 → `controller.*` 兜底），没有搜索、没有端口探测；「配置文件里没有 `external-controller`、地址由命令行或环境变量注入」的机器同样能定位
-- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（68 个单测）
-- 实测：exe 373 KiB（381,952 B）；空闲私有内存 2.6–3.4 MB，工作集 ~15 MB
+- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（79 个单测）
+- 实测：exe 388.5 KiB（397,824 B；本轮 11 条差距修复 +2 条文案后又测了一次，之前是 381,952 B）；空闲私有内存 2.6–3.4 MB，工作集 ~15 MB
 - 验证方式：真机运行截图（`assets/app-menu-light.png`）+ 分组数据逐项比对 live API + 长列表滚动箭头（`assets/native-menu-scroll-arrows.png`）
 
 ## 需要人工点一遍的清单（自动化覆盖不到）
@@ -28,26 +28,39 @@ Phase 1（MVP）已实现并真机验证：
 | 10 | 打开自动组（`URLTest`）子菜单并点一个节点 | 切换成功且组名出现 `· 已固定`；再点「自动（取消固定）」恢复自动 |
 | 11 | 「打开 Web 面板」（留空 `ui.web_url`，内核配了 `external-ui`） | 默认浏览器打开 `http://<控制器地址>/ui/`；内核没配 `external-ui` 时页面 404（这是内核侧的事，不是本程序失败） |
 | 12 | `ui.web_url` 指向托管面板（如 `https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}`） | 打开的页面已连上当前内核；若浏览器报 CORS，需在内核的 `external-controller-cors.allow-origins` 里放行该来源 |
+| 13 | 键盘：选中托盘图标（Tab/方向键走到通知区域）后按空格或回车 | 菜单同样弹出（`NIN_SELECT`/`NIN_KEYSELECT`）；Esc 或点外部关掉后，焦点回到图标上，再按一次空格仍能弹出 |
+| 14 | 显示器缩放改成 150%/200%（或把图标拖到另一台不同 DPI 的显示器）后，等资源管理器重发 `TaskbarCreated`（重启 explorer.exe） | 重新注册的图标按当前 `SM_CXSMICON` 重画，不发虚 |
+| 15 | 在主显示器右/下边缘打开菜单，且状态行很长（故意写一个长错误） | 菜单整体被移进工作区，不越出屏幕（`TPM_WORKAREA`） |
+| 16 | 程序第一次启动后再启动一次 exe | 弹出「mihomo-tray 已在运行…」提示框后退出，而不是静默消失 |
 
 > 说明：自动化向隐藏窗口 `PostMessage` 弹出菜单时，窗口拿不到前台激活权，模拟鼠标/键盘无法驱动系统菜单内部循环，因此第 1、2 项必须人工确认。
 
-## 已知差距（发布前审查记录，未修复）
+## 已知差距（2026-09 发布前审查记录）
 
-均为审查确认存在、但影响面小或需要真机交互验证才能定论的问题，留待后续：
+### 已修复
 
-| # | 位置 | 问题 | 影响 |
+| # | 位置 | 问题 | 修法 |
 |---|---|---|---|
-| 1 | `src/mihomo/api.rs` `Client::new` | `https://` 前缀被去掉后按明文 http 连（不带 `WINHTTP_FLAG_SECURE`） | 已在 README/DESIGN §8 记为已知限制；要支持 TLS 需加 secure 标志与证书策略 |
-| 2 | `src/win/mod.rs` `TrackPopupMenuEx` | 未带 `TPM_WORKAREA`，长状态/错误行只靠锚点钳制 | 菜单可能横向越出工作区；需真机点一次确认是否真发生 |
-| 3 | `src/win/mod.rs` `on_tray_event` | 只处理 `WM_*BUTTONUP`/`WM_CONTEXTMENU`，未处理 `NIN_SELECT`/`NIN_KEYSELECT`，也未在取消后 `NIM_SETFOCUS` | 键盘（空格/回车）无法打开菜单；需真机验证 |
-| 4 | `src/app.rs` `on_taskbar_created` | 图标像素尺寸只在 `Icons::new()` 取一次；主显示器 DPI 变化时 `TaskbarCreated` 也会广播 | 重新注册的图标可能按旧尺寸缩放而偏糊 |
-| 5 | `src/win/autostart.rs` `is_enabled` | 只判断 `Run` 值是否存在，不比对当前 exe 路径 | 程序被移动后仍显示"已开启" |
-| 6 | `src/win/menu.rs` | `AppendMenuW`/`CreatePopupMenu` 失败未检查 | 极端情况下菜单静默少项 |
-| 7 | `src/mihomo/proc.rs` `image_path` | 520 单元缓冲区不够长（>520 字符的映像路径）时记为"不可核验" | 会被当成"可能是我们的内核"，多弹一次 UAC |
-| 8 | `src/settings.rs` `page_size` | 未像 `timeout_ms`/`poll_interval_ms` 那样钳制，非数字静默变 0 | 无实际危害，仅缺诊断 |
-| 9 | `src/i18n.rs` `fallback` | 语言文件存在但为空/节名写错时，叠加在 en-US 之上 | 中文系统的用户文件写错会看到英文界面（README 已说明回退规则） |
-| 10 | `src/i18n.rs` `fill` | 占位符从左到右整体替换，组名里含 `{kind}` 这类文本会被交叉替换 | 面板/分组名恰好含占位符文本时显示异常 |
-| 11 | `src/main.rs` | 第二个实例静默退出，不提示 | Windows 11 托盘溢出区里用户可能以为"没启动" |
+| 2 | `src/win/mod.rs` `show_context_menu` | 未带 `TPM_WORKAREA`，长状态行可能撑出工作区 | 标志加上（锚点钳制保留：它只决定菜单从哪出现，`TPM_WORKAREA` 才管菜单自身宽度） |
+| 3 | `src/win/mod.rs` `on_tray_event` | 不处理 `NIN_SELECT`/`NIN_KEYSELECT`，取消后不 `NIM_SETFOCUS` | 键盘激活进同一条菜单路径；菜单关闭后 `App::refocus_icon` 把焦点还给通知区域（`NIN_KEYSELECT` 由已导出的 `NIN_SELECT \| NINF_KEY` 现算） |
+| 4 | `src/app.rs` `on_taskbar_created` | 图标尺寸只在 `Icons::new()` 取一次 | `Icons::refresh_size()` 比对当前 `SM_CXSMICON`，变了就整套重画 |
+| 5 | `src/win/autostart.rs` `is_enabled` | 只判 `Run` 值是否存在 | 与当前 exe 的带引号路径比对（路径展开后忽略大小写），被搬走的旧条目不再显示"已开启" |
+| 7 | `src/mihomo/proc.rs` `image_path` | 520 单元固定缓冲，更长的映像路径记为"不可核验" | 起始 1024 单元、失败即翻倍（上限 32K，即 Windows 自身接受的最长路径）；单测用 4 单元起始缓冲证明会增长而不是判"不可核验" |
+| 8 | `src/settings.rs` `page_size` | 未钳制 | 上限 `MAX_PAGE_SIZE = 1000`；`0` 与"非数字"都保持文档里的"不分页" |
+| 10 | `src/i18n.rs` `fill` | 占位符从左到右整体替换，值里的 `{kind}` 会被交叉替换 | 单遍扫描模板、边扫边拼，替换结果不再回扫 |
+| 11 | `src/main.rs` | 第二个实例静默退出 | `i18n::init()` 提到单实例判定之前，第二实例弹一次说明框（图标在哪）后退出 |
+| — | `src/mihomo/api.rs` `Client::new` | `https://` 前缀被去掉后按明文连 | 明确拒绝（`ClientError::TlsUnsupported`），由 `discover` 给出专属文案；不再静默降级 |
+
+> #2/#3 属"改了更好、但结论要真机确认"的一类：#2 需要在一个长状态行、显示器边缘再点一次菜单确认没有越界；#3 需要真机按空格/回车开菜单、Esc 取消后确认焦点还在图标上（自动化点不到系统菜单内部循环，见上一节说明）。
+
+### 决定不改（记录理由，避免下一轮重复讨论）
+
+| # | 位置 | 问题 | 不改的理由 |
+|---|---|---|---|
+| 1 | `src/mihomo/api.rs` | 无 TLS 客户端（已由上面的显式拒绝覆盖） | 控制器在本机回环；要真支持 TLS 得引入 WinHTTP secure 标志与证书策略（自签名证书默认会被拒，得再做信任决策），收益与风险不成比例 |
+| 6 | `src/win/menu.rs` | `AppendMenuW`/`CreatePopupMenu` 失败未检查 | 项数已由 `MAX_ITEMS = 1500` 封顶，失败等价于内存耗尽；要报错得把错误通道穿进 `Menu::build` → `Action`/`Snapshot`/i18n 四处，事后还只能报"菜单不完整" |
+| — | `mihomo.auto_start` 与 `Run` 项 `mihomo-tray` | 两个名字都像"开机自启" | 不同设置、都有用：`mihomo.auto_start` 决定**内核**是否随本程序启动，`Run` 项 `mihomo-tray` 决定**本程序**是否随 Windows 启动（菜单里那项的勾选状态来自注册表，永远读的是后者）。两者都保留 |
+| 9 | `src/i18n.rs` `fallback` | 语言文件出错时叠加在 en-US 之上 | 这是设计选择：缺的键一律落到内置英文表，不会出现"半个界面空白"。改成"以该语言内置表为底"需要同步改 README/本节与 `a_language_file_is_layered_on_the_fallback` 单测，属产品决策而非缺陷 |
 
 ## Phase 2 候选（按价值/成本）
 

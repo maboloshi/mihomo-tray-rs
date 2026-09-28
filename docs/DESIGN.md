@@ -213,7 +213,7 @@ src/icon.rs                 # RGBA → HICON（多尺寸、状态色）
 ## 7. 设置文件 `tray.yml`
 
 位置：exe 同目录优先（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`；同目录那份**必须有内容**才算数（scoop 清单会建 0 字节文件，空/不可读一律回退 `%APPDATA%`）。首次运行按当前界面语言写出模板：仓库里的 `tray_Sample_zh.yml` / `tray_Sample_en.yml`（`include_str!` 进二进制，仓库与生成物永不漂移）。
-解析：`key: value`、一层嵌套、`#` 注释、`"` 或 `'` 引号；不支持列表内联以外的 YAML 特性（无锚点、无多行块）、不支持列表跨行。文件可带 UTF-8 BOM；引号只在同一行内有配对时才开启，所以 `don't` 这样的撇号不会把行尾注释吞进值里。**路径三项（`path`/`home`/`config`）先做 `%NAME%` 展开（`ExpandEnvironmentStringsW`，与 cmd 一致）再要求绝对**：相对路径、`~`、`$VAR` 一律拒绝并报出原值与展开值（`src/paths.rs`）；`mihomo.args` 里的 `-d`/`-f`/`-ext-ctl`/`-secret` 直接被拒（同一设置两处写法）。`https://` 前缀会被去掉，控制器一律按明文 http 连（见 §8 已知限制）。
+解析：`key: value`、一层嵌套、`#` 注释、`"` 或 `'` 引号；不支持列表内联以外的 YAML 特性（无锚点、无多行块）、不支持列表跨行。文件可带 UTF-8 BOM；引号只在同一行内有配对时才开启，所以 `don't` 这样的撇号不会把行尾注释吞进值里。**路径三项（`path`/`home`/`config`）先做 `%NAME%` 展开（`ExpandEnvironmentStringsW`，与 cmd 一致）再要求绝对**：相对路径、`~`、`$VAR` 一律拒绝并报出原值与展开值（`src/paths.rs`）；`mihomo.args` 里的 `-d`/`-f`/`-ext-ctl`/`-secret` 直接被拒（同一设置两处写法）。`https://` 的控制器地址被拒绝而不是去掉前缀（见 §8 已知限制）。
 
 ```yaml
 mihomo:
@@ -264,7 +264,7 @@ ui:
   - 记录的 PID 只在本会话内有效（跨托盘重启靠路径身份兜底）；PID 号被复用的窗口极小，但仍以"它还在 `mihomo.exe` 列表里"为唯一校验。
   - 替换助手要**自己读 `tray.yml`**，所以它看到的布局取决于它以哪个账户运行：`%APPDATA%` 若不是本账户的，只有 exe 旁的便携 `tray.yml` 一定可见；这种情况下它回 `-7` 并保持旧内核不动，而不是按半份设置启动一个新内核。
   - 关闭 TUN **不回读**（开启必须回读）：静默失败只会表现为菜单勾选状态没变。
-  - **控制器只按明文 http 访问**：`Client::new` 会去掉 `http://`/`https://` 前缀，WinHTTP 请求不带 `WINHTTP_FLAG_SECURE`。控制器在本机回环上时这不是问题（mihomo 的 `external-controller` 本身就是明文 http）；跨机需要加密时自行套隧道。
+  - **控制器只按明文 http 访问**：`Client::new` 接受 `host:port` 与 `http://host:port`，写 `https://host:port` 会被明确拒绝（`ClientError::TlsUnsupported`，文案见 `error.controller_tls`）。WinHTTP 请求一律不带 `WINHTTP_FLAG_SECURE`——去掉前缀再按明文连，等于把明文请求发到一个只答 TLS 的端口上，所以宁可报错。控制器在本机回环上时这不是问题（mihomo 的 `external-controller` 本身就是明文 http）；跨机需要加密时自行套隧道，或在托管面板里填 https 地址（那只影响浏览器）。
 
 ---
 
@@ -292,10 +292,10 @@ ui:
 
 1. **当前项用 ✔ 而不是 ●**：模式与分组当前值统一用 `MF_CHECKED`（用户要求「当前节点打对钩」），因此不需要 `MFT_RADIOCHECK`。分组的当前值是嵌套子组时，**子菜单项本身也带 ✔**（`MF_POPUP | MF_CHECKED`）。
 2. **worker 先刷新再等待**：原实现先 `recv_timeout(poll)` 再刷新，导致首个菜单（3 s 前打开）显示空状态；现改为循环开头立刻刷新，实现中实测发现并修复。
-3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`，无资源文件、无图像库。
+3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`（`Icons::new` 与 `TaskbarCreated` 重注册时各量一次，主显示器 DPI 变化后重画而不是沿用旧尺寸），无资源文件、无图像库。
 4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
-5. **实测体积/内存**：exe 373 KB（381,952 B；i18n 之前 338 KB，增量见 §11.7），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
-6. **单测 71 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退；设置层断言子集解析的边界（BOM、撇号、引号内逗号、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
+5. **实测体积/内存**：exe 388.5 KB（397,824 B；i18n 之前 338 KB，增量见 §11.7；本轮"已知差距"修复后再测，之前 381,952 B），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
+6. **单测 79 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"），图标层断言当前尺寸与 `SM_CXSMICON` 一致；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
 7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（62 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
    **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB，当时的数字），远高于动工前估的 3–4 KB——语言表本体、62 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（62 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
 
@@ -315,7 +315,7 @@ ui:
 | `mixed-port` 无检查强转 `u16`（70000 → 4464 并写进系统代理） | 越界过滤为 0 |
 | `CreateDIBSection` 部分失败时泄漏 `HBITMAP`；AND mask 未初始化 | 失败路径释放，mask 传零填充缓冲 |
 | 响应体无上限缓冲 | 8 MiB 上限，超出报「响应过大」 |
-| 其它 | 中毒锁 `into_inner`、`WM_DESTROY` 删除图标、`NIM_SETVERSION` 失败即重试、uxtheme 优先按名取、mihomo 配置注释剥离识别引号、`Menu` 实现 `Drop`、启动等待内核限定 5 s 预算 |
+| 其它 | 中毒锁 `into_inner`、`WM_DESTROY` 删除图标、`NIM_SETVERSION` 失败即重试、uxtheme 优先按名取、mihomo 配置注释剥离识别引号、`Menu` 实现 `Drop`、启动等待内核限定 5 s 预算、`Client::new` 返回具名错误（`NotAnAddress`/`TlsUnsupported`）、进程映像路径缓冲按需翻倍（起始 1024、上限 32K）、`groups.page_size` 上限 1000 |
 
 ### 代码审查修复（第三轮，发布前）
 
