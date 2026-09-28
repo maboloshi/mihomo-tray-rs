@@ -72,7 +72,7 @@ Phase 1（MVP）已实现并真机验证：
 4. **收尾三件套必须全绿**：`cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release`。
 5. **线程模型不得破坏**：UI 线程只做 Win32 与注册表操作；所有 HTTP 在 worker 线程；`muda`/`HMENU` 这类菜单对象只能在创建它的线程使用。
 6. **停止内核不要用 `taskkill /IM`**：只结束自己启动或路径匹配的进程。
-7. **不要靠解析 `config.yaml` 推断控制器地址**：它常由 `-ext-ctl` / 环境变量注入，解析只能作为兜底，最终以 `GET /` 探测为准。
+7. **控制器设置按 mihomo 自己的优先级解析**：运行内核 argv 的 `-ext-ctl`/`-secret` → `CLASH_OVERRIDE_*` 环境变量 → 内核配置文件里的 `external-controller`/`secret` → `tray.yml` 的 `controller.address`/`secret`（**兜底，不是覆盖**）。禁止再引入端口探测或"猜一个常见端口"，也禁止让 `controller.*` 反向压过内核设置（详见 DESIGN §4）。
 8. **提交分组**：一个主题一个 commit；本机 git 一律 `-c core.autocrlf=false`（严格 LF）。
 9. **提权只走一次性辅助进程，且只收 PID、用退出码回答**：同一个 exe 的 `--kernel-start-elevated` / `--kernel-stop-elevated` 隐藏模式，在单实例与窗口逻辑之前处理；内核的映像与启动参数必须由副本从那个进程自己读出（映像名必须是 `mihomo.exe`），**禁止**接受命令行传入的 exe 路径或启动参数——否则就是一个"UAC 弹窗写着本程序、实际以管理员运行任意程序"的提权原语。启动成功时副本用**退出码回传新内核的 PID**（失败为负数），托盘记下来供后续停止使用；**禁止**用文件/管道回传（等于让管理员按调用者给的路径写文件）。路径比较一律走 `proc::same_image`（junction/大小写归一化），不得直接比字符串。不得引入常驻提权进程、计划任务或服务。
 10. **先量后设计**：涉及进程身份、权限或路径的判断，先在同一台机器上实测一次 Win32 行为（映像路径、token、端口归属）再写逻辑；本轮三次误判（shim 拓扑、分类判定）都是没先量造成的。坑清单见 DESIGN §5.1。
