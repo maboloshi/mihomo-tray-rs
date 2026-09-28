@@ -56,6 +56,8 @@ Phase 1（MVP）已实现并真机验证：
 | 一键测速（`GET /group/{name}/delay`） | 中 | 小 | 测速后 `/proxies` 才出现 `history`，可顺带把延迟写进菜单文本 |
 | 退出时禁用系统代理（`proxy.system_proxy_on_exit`） | 中 | 小 | 配置项已预留语义 |
 | 关闭所有连接（`DELETE /connections`） | 低 | 小 | 一行 API |
+| 重启内核（`POST /restart`） | 中 | 中 | 保持提权与环境、无需 helper；真正的成本是把 `Worker.client` 改成可热替换。详见 [RESTART_KERNEL.md](RESTART_KERNEL.md) |
+| 强制重启（按 `tray.yml` 归一别人的内核） | 中 | 大 | 需用户确认 + 提权副本新入口，见 [RESTART_KERNEL.md](RESTART_KERNEL.md) §5 |
 | 订阅 provider 刷新（`PUT /providers/proxies/{name}`） | 中 | 小 | 需先读 `/providers/proxies` 展示 `updatedAt` |
 | ~~schtasks 免 UAC 自启（含 TUN 开机即用）~~ | — | — | 已否决：计划任务服务可能被禁用。改为点 TUN 时按需提权（一次性辅助进程重启内核） |
 | 节点延迟/健康色点（owner-draw 菜单项） | 中 | 大 | 观感提升明显，但要 `WM_MEASUREITEM`/`WM_DRAWITEM` 全套 |
@@ -81,4 +83,5 @@ Phase 1（MVP）已实现并真机验证：
 - mihomo API 的坑（空 body 400、`force=true` 才重建 inbound、TUN 失败仍返回 204、组名必须 percent-encode）：见 [DESIGN.md](DESIGN.md) §5
 - **Windows 侧的坑**（junction 导致映像路径与拼写不等、scoop shim 是启动器且与真内核同名的父子关系、`runas` 不传环境/可能换账户、退出码回传 PID、高 IL 进程"句柄能开路径被拒"）：见 [DESIGN.md](DESIGN.md) §5.1
 - TUN 提权链路（回读 → 提权副本重启内核 → 重试；取消 UAC 无副作用）：见 [DESIGN.md](DESIGN.md) §8
+- 重启内核 / 强制重启：实测数据、流程、待拍板项与起点信息：见 [RESTART_KERNEL.md](RESTART_KERNEL.md)
 - 体积/内存实测与实现偏差：见 [DESIGN.md](DESIGN.md) §2、§11
