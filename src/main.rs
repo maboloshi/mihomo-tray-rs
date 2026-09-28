@@ -20,15 +20,20 @@ fn main() {
         std::process::exit(code);
     }
 
+    // The language comes before the single-instance guard: a second launch is
+    // answered with a message of its own, and that message has to be in the
+    // user's language like everything else.
+    i18n::init();
+
     if !instance::acquire() {
+        // Silently leaving looks like "the program did not start" — on Windows 11
+        // the icon of the running instance is usually hidden in the tray overflow,
+        // so say that it is there instead.
+        win::notice(&i18n::t().error_single_instance);
         return;
     }
 
     let settings_path = settings::settings_path();
-    // First, because everything below reports failures through the UI strings —
-    // and because the sample `tray.yml` is written in the language those strings
-    // are in.
-    i18n::init();
     settings::ensure_default_file(&settings_path, settings::default_file(i18n::language()));
     let (settings, settings_error) = settings::load(&settings_path);
     let fatal = settings_error.map(|error| {
