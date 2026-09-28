@@ -19,15 +19,15 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
-    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETFOCUS,
+    NIM_SETVERSION, NIN_SELECT, NINF_KEY, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
     GetMessageW, GetWindowLongPtrW, HICON, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
     RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU, WM_DESTROY,
-    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
+    TPM_RIGHTBUTTON, TPM_WORKAREA, TrackPopupMenuEx, TranslateMessage, WM_APP, WM_CONTEXTMENU,
+    WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WNDCLASSW, WS_POPUP,
 };
 
 use crate::app::App;
@@ -39,6 +39,11 @@ pub const WM_REFRESH: u32 = WM_APP + 2;
 /// The worker stopped the kernel and the tray should leave without doing more.
 pub const WM_EXIT: u32 = WM_APP + 3;
 const TRAY_ID: u32 = 1;
+
+/// The event a keyboard activation sends besides `NIN_SELECT`. `windows-sys`
+/// exports `NIN_SELECT` and `NINF_KEY` but not the combination the shell
+/// documents as `NIN_KEYSELECT`, which is Enter specifically.
+const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 
 /// Create the (never shown) window that owns the tray icon and receives menu
 /// commands. `app` must outlive the window.
@@ -99,10 +104,17 @@ pub fn add_icon(hwnd: HWND, icon: HICON, tooltip: &str) -> bool {
     }
 }
 
-pub fn update_icon(hwnd: HWND, icon: HICON, tooltip: &str) {
+/// Refresh the icon in place. `focused` is `NIM_SETFOCUS`, which the shell wants
+/// after a menu opened from a keyboard event has been dismissed: without it the
+/// keyboard focus does not return to the notification area, and the next
+/// space/Enter goes to whatever window had it before.
+pub fn update_icon(hwnd: HWND, icon: HICON, tooltip: &str, focused: bool) {
     unsafe {
         let data = icon_data(hwnd, icon, tooltip);
         Shell_NotifyIconW(NIM_MODIFY, &data);
+        if focused {
+            Shell_NotifyIconW(NIM_SETFOCUS, &data);
+        }
     }
 }
 
@@ -244,6 +256,20 @@ pub fn fatal(message: &str) {
     }
 }
 
+/// Something the user should know before the program leaves. Not an error: the
+/// run it belongs to simply has nothing to do.
+pub fn notice(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            wide(message).as_ptr(),
+            wide("mihomo-tray").as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
 /// Whether the user agrees to something that cannot be undone.
 ///
 /// Called from the worker thread, like the UAC prompt, so the UI thread keeps
@@ -315,9 +341,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 fn on_tray_event(app: *mut App, wparam: WPARAM, lparam: LPARAM) {
     // NOTIFYICON_VERSION_4: the low word of lparam is the event, wparam packs x/y.
     let event = (lparam & 0xffff) as u32;
-    if !matches!(event, WM_RBUTTONUP | WM_CONTEXTMENU | WM_LBUTTONUP) {
+    // `NIN_SELECT` is what the shell sends for a keyboard activation (space or
+    // Enter, and the shell's own "select" for a mouse click), `NIN_KEYSELECT` for
+    // Enter specifically. Both have to open the menu, otherwise the icon is
+    // reachable by mouse only.
+    if !matches!(
+        event,
+        WM_RBUTTONUP | WM_CONTEXTMENU | WM_LBUTTONUP | NIN_SELECT | NIN_KEYSELECT
+    ) {
         return;
     }
+    let keyboard = event == NIN_SELECT || event == NIN_KEYSELECT;
     let x = (wparam & 0xffff) as i16 as i32;
     let y = ((wparam >> 16) & 0xffff) as i16 as i32;
     let (x, y) = if x < 0 || y < 0 {
@@ -329,10 +363,10 @@ fn on_tray_event(app: *mut App, wparam: WPARAM, lparam: LPARAM) {
     } else {
         (x, y)
     };
-    show_context_menu(app, x, y)
+    show_context_menu(app, x, y, keyboard)
 }
 
-fn show_context_menu(app: *mut App, x: i32, y: i32) {
+fn show_context_menu(app: *mut App, x: i32, y: i32, keyboard: bool) {
     unsafe {
         if (*app).menu_open {
             return;
@@ -345,9 +379,12 @@ fn show_context_menu(app: *mut App, x: i32, y: i32) {
         let (x, y) = clamp_to_work_area(x, y);
 
         SetForegroundWindow(hwnd);
+        // `TPM_WORKAREA` keeps the menu inside the work area by moving it, which
+        // the anchor clamp above cannot do on its own: it only decides where the
+        // menu is asked to appear, not how much room its own width needs.
         let selected = TrackPopupMenuEx(
             menu.handle,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_WORKAREA,
             x,
             y,
             hwnd,
@@ -359,6 +396,11 @@ fn show_context_menu(app: *mut App, x: i32, y: i32) {
 
         let action = menu.action(selected as usize).cloned();
         menu.destroy();
+        // A menu opened from the keyboard takes the focus with it; hand it back to
+        // the notification area, or the next key press lands elsewhere.
+        if keyboard {
+            (*app).refocus_icon();
+        }
         // Keep the guard set across `dispatch`: it performs Win32 calls that can
         // pump messages (ShellExecuteW, InternetSetOptionW), and without the guard
         // a pumped message could re-enter the window procedure and build a second

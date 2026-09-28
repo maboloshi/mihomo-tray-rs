@@ -105,12 +105,33 @@ impl App {
         let snapshot = state::read(&self.state);
         let icon = self.icons.for_state(icon_state(&snapshot));
         if self.icon_ready {
-            win::update_icon(self.hwnd, icon, &tooltip(&snapshot));
+            win::update_icon(self.hwnd, icon, &tooltip(&snapshot), false);
         } else {
             self.icon_ready = win::add_icon(self.hwnd, icon, &tooltip(&snapshot));
         }
     }
+
+    /// Hand the keyboard focus back to the notification area after a menu that was
+    /// opened with the keyboard, sending the icon again so the shell has data to
+    /// act on. Without it the next space/Enter lands in whatever window had the
+    /// focus before the menu.
+    pub fn refocus_icon(&mut self) {
+        if !self.icon_ready {
+            return;
+        }
+        let snapshot = state::read(&self.state);
+        let icon = self.icons.for_state(icon_state(&snapshot));
+        win::update_icon(self.hwnd, icon, &tooltip(&snapshot), true);
+    }
+
     pub fn on_taskbar_created(&mut self) {
+        // Explorer restarting also re-broadcasts `TaskbarCreated` when the DPI of
+        // the primary display changed, so the icons are measured again here rather
+        // than kept at the size this process started with — a re-registered icon
+        // rendered for the old DPI comes back blurry.
+        if self.icons.refresh_size() {
+            self.icons = Icons::new();
+        }
         let snapshot = state::read(&self.state);
         let icon = self.icons.for_state(icon_state(&snapshot));
         self.icon_ready = win::add_icon(self.hwnd, icon, &tooltip(&snapshot));

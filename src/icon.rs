@@ -37,17 +37,36 @@ pub struct Icons {
     pub green: HICON,
     pub amber: HICON,
     pub blue: HICON,
+    /// The pixel size these icons were drawn for. Kept so the set can be measured
+    /// against the current notification area, which changes with the DPI of the
+    /// primary display.
+    size: i32,
 }
 
 impl Icons {
     pub fn new() -> Self {
-        let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64);
+        let size = system_icon_size();
         Self {
             gray: make_icon(&render(GRAY, size as usize), size),
             green: make_icon(&render(GREEN, size as usize), size),
             amber: make_icon(&render(AMBER, size as usize), size),
             blue: make_icon(&render(BLUE, size as usize), size),
+            size,
         }
+    }
+
+    /// Whether the notification area now wants icons of another pixel size.
+    /// `TaskbarCreated` is re-broadcast after a display change, so this is what
+    /// tells a re-registration to draw the icons again instead of reusing the ones
+    /// measured when the process started.
+    pub fn refresh_size(&self) -> bool {
+        system_icon_size() != self.size
+    }
+
+    /// The pixel size the current set was drawn for.
+    #[cfg(test)]
+    pub fn size(&self) -> i32 {
+        self.size
     }
 
     /// TUN wins over the system proxy and both win over a plainly usable kernel,
@@ -60,6 +79,12 @@ impl Icons {
             State::Unreachable => self.gray,
         }
     }
+}
+
+/// The size the notification area draws icons at. Read through a function rather
+/// than kept in a constant: it follows the DPI of the primary display.
+fn system_icon_size() -> i32 {
+    unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64)
 }
 
 impl Drop for Icons {
@@ -188,5 +213,22 @@ fn make_icon(bgra: &[u8], size: i32) -> HICON {
         DeleteObject(mask_bitmap);
         ReleaseDC(std::ptr::null_mut(), screen);
         icon
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icons_are_measured_against_the_current_notification_area() {
+        let icons = Icons::new();
+        // A fresh set was just measured, so the notification area cannot have
+        // another size for it — unless the display changed between the two reads,
+        // which no test can arrange.
+        assert!(!icons.refresh_size());
+        // The size is the one `GetSystemMetrics` reports, clamped to the range the
+        // renderer is written for.
+        assert!((16..=64).contains(&icons.size()));
     }
 }
