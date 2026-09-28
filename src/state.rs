@@ -1,8 +1,9 @@
 //! Shared runtime state. The worker thread writes, the UI thread reads.
 
 use std::path::PathBuf;
-use std::process::Child;
 use std::sync::{Arc, Mutex};
+
+use crate::mihomo::proc::KernelChild;
 
 #[derive(Debug, Clone, Default)]
 pub struct Group {
@@ -157,7 +158,7 @@ pub fn write_kernel_started(state: &Shared, note: String) {
 #[derive(Debug, Default)]
 pub struct Kernel {
     path: Option<PathBuf>,
-    child: Option<Child>,
+    child: Option<KernelChild>,
 }
 
 pub type KernelSlot = Arc<Mutex<Kernel>>;
@@ -180,7 +181,7 @@ pub fn write_kernel_path(slot: &KernelSlot, path: Option<PathBuf>) {
 }
 
 /// Record the handle of the kernel this program launched.
-pub fn write_kernel_child(slot: &KernelSlot, child: Child) {
+pub fn write_kernel_child(slot: &KernelSlot, child: KernelChild) {
     lock(slot).child = Some(child);
 }
 
@@ -190,6 +191,6 @@ pub fn kernel_path(slot: &KernelSlot) -> Option<PathBuf> {
 }
 
 /// Claim the handle of the kernel this program launched.
-pub fn take_kernel_child(slot: &KernelSlot) -> Option<Child> {
+pub fn take_kernel_child(slot: &KernelSlot) -> Option<KernelChild> {
     lock(slot).child.take()
 }

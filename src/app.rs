@@ -1100,11 +1100,13 @@ mod tests {
         let state = state::shared();
         let kernel = state::kernel_slot();
         state::write_kernel_pid(&state, Some(4321));
-        let child = std::process::Command::new("cmd")
-            .args(["/c", "exit"])
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("start a stand-in for the kernel process");
+        let child = proc::KernelChild::adopt(
+            std::process::Command::new("cmd")
+                .args(["/c", "exit"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("start a stand-in for the kernel process"),
+        );
         state::write_kernel_child(&kernel, child);
         let mut worker = Worker {
             client: Some(Client::new(&address, "", 2000).expect("client")),

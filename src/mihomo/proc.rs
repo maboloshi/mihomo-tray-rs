@@ -2,17 +2,31 @@
 //! process this program is responsible for, and — through the elevated helper —
 //! replace it with one that has the rights TUN needs.
 
+use std::ffi::OsStr;
+use std::io;
+use std::mem::size_of;
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::ExitStatus;
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, LocalFree, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    LocalFree, TRUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Environment::GetCommandLineW;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CreateProcessW, GetExitCodeProcess, INFINITE, OpenProcess,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess,
+    WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
@@ -215,7 +229,92 @@ fn read_image_path(handle: HANDLE, first_size: u32) -> (PathBuf, bool) {
     }
 }
 
-/// Start the kernel without a console window; the returned child stays under our
+/// The kernel this program started, held by its process handle.
+///
+/// `std::process::Child` is the obvious type, but a `Child` only comes out of
+/// `std::process::Command`, and that launcher carries an environment block, a
+/// pipe relay and its own argument quoting into a program that starts exactly one
+/// process. This type keeps the three things the program does with the kernel it
+/// launched — is it still running, end it, wait for it — on the handle
+/// `CreateProcessW` hands back.
+#[derive(Debug)]
+pub struct KernelChild {
+    pid: u32,
+    handle: HANDLE,
+}
+
+impl KernelChild {
+    /// The PID: what the replacing helper answers with, so the tray learns which
+    /// process it now owns.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// `Ok(None)` while the kernel runs, its exit status once it is gone.
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        match unsafe { WaitForSingleObject(self.handle, 0) } {
+            WAIT_TIMEOUT => Ok(None),
+            WAIT_OBJECT_0 => self.exit_status().map(Some),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// End the kernel. A process that is already gone is a failure here, like it
+    /// is for `std::process::Child`: the caller only kills what it just saw
+    /// running.
+    pub fn kill(&mut self) -> io::Result<()> {
+        if unsafe { TerminateProcess(self.handle, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Wait for the kernel to disappear. The caller wants the process object gone
+    /// (the replacement binds the same ports), not the exit code.
+    pub fn wait(&mut self) -> io::Result<ExitStatus> {
+        if unsafe { WaitForSingleObject(self.handle, INFINITE) } == WAIT_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        self.exit_status()
+    }
+
+    fn exit_status(&self) -> io::Result<ExitStatus> {
+        let mut code = 0u32;
+        if unsafe { GetExitCodeProcess(self.handle, &mut code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(ExitStatus::from_raw(code))
+    }
+
+    /// Take over a process somebody else started, for the tests that need a live
+    /// stand-in for a kernel.
+    #[cfg(test)]
+    pub fn adopt(child: std::process::Child) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        // The handle is taken over rather than copied: the child must not close it
+        // on drop, because its new owner closes it.
+        let child = std::mem::ManuallyDrop::new(child);
+        Self {
+            pid: child.id(),
+            handle: child.as_raw_handle() as HANDLE,
+        }
+    }
+}
+
+impl Drop for KernelChild {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+// A process handle belongs to the process, not to the thread: the worker starts
+// the kernel and the UI thread ends it, exactly like the `std::process::Child`
+// this replaces.
+unsafe impl Send for KernelChild {}
+
+/// Start the kernel without a console window; the returned handle stays under our
 /// control so "exit and stop mihomo" only affects the instance we launched.
 ///
 /// The working directory is set to the kernel's own, because the kernel resolves
@@ -223,24 +322,128 @@ fn read_image_path(handle: HANDLE, first_size: u32) -> (PathBuf, bool) {
 /// would make that depend on how the tray itself was started (an Explorer launch
 /// hands it whatever the shell had). The kernel's directory is at least one its
 /// user knows.
-pub fn start(exe: &Path, args: &[String]) -> Result<Child, String> {
-    let mut command = Command::new(exe);
-    if let Some(dir) = exe.parent() {
-        command.current_dir(dir);
+pub fn start(exe: &Path, args: &[String]) -> Result<KernelChild, String> {
+    unsafe { spawn(exe, args) }.map_err(|error| {
+        i18n::t().error_start_process(&exe.display().to_string(), &error.to_string())
+    })
+}
+
+unsafe fn spawn(exe: &Path, args: &[String]) -> io::Result<KernelChild> {
+    let executable = nul_terminated(exe.as_os_str());
+    let mut line = kernel_command_line(exe, args);
+    let directory = exe.parent().map(|dir| nul_terminated(dir.as_os_str()));
+    // The kernel has a hidden console of its own and nobody reads what it writes
+    // there, so all three streams are the NUL device — `Stdio::null()` by hand.
+    // Failing to open it is not fatal: without `STARTF_USESTDHANDLES` the kernel
+    // simply starts with no standard handles at all.
+    let inheritable = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: TRUE,
+    };
+    let device = nul_terminated(OsStr::new("NUL"));
+    let null_device = unsafe {
+        CreateFileW(
+            device.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &inheritable,
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    let inherit = null_device != INVALID_HANDLE_VALUE;
+    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    startup.cb = size_of::<STARTUPINFOW>() as u32;
+    if inherit {
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = null_device;
+        startup.hStdOutput = null_device;
+        startup.hStdError = null_device;
     }
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
+    let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let created = unsafe {
+        CreateProcessW(
+            executable.as_ptr(),
+            line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            inherit as i32,
+            CREATE_NO_WINDOW,
+            std::ptr::null(),
+            directory
+                .as_ref()
+                .map_or(std::ptr::null(), |dir| dir.as_ptr()),
+            &startup,
+            &mut process,
+        )
+    };
+    if inherit {
+        unsafe {
+            CloseHandle(null_device);
+        }
     }
-    command
-        .spawn()
-        .map_err(|e| i18n::t().error_start_process(&exe.display().to_string(), &e.to_string()))
+    if created == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        CloseHandle(process.hThread);
+    }
+    Ok(KernelChild {
+        pid: process.dwProcessId,
+        handle: process.hProcess,
+    })
+}
+
+/// The command line for `exe` followed by `args`, NUL-terminated. `CreateProcessW`
+/// takes one string where the argument boundaries are quoting, not separation.
+fn kernel_command_line(exe: &Path, args: &[String]) -> Vec<u16> {
+    let mut line = Vec::new();
+    append_arg(&mut line, exe.as_os_str());
+    for arg in args {
+        line.push(' ' as u16);
+        append_arg(&mut line, OsStr::new(arg));
+    }
+    line.push(0);
+    line
+}
+
+/// Append one argument, quoted the way the C runtime reads a command line back
+/// (the rules `CommandLineToArgvW` implements, which `std::process::Command`
+/// follows too): an argument that is empty or holds a space, a tab or a quote is
+/// wrapped in quotes, and backslashes that would otherwise sit in front of a
+/// quote are doubled so they read as backslashes.
+fn append_arg(line: &mut Vec<u16>, arg: &OsStr) {
+    let quoted = arg.is_empty()
+        || arg
+            .encode_wide()
+            .any(|unit| unit == ' ' as u16 || unit == '\t' as u16 || unit == '"' as u16);
+    if !quoted {
+        line.extend(arg.encode_wide());
+        return;
+    }
+    line.push('"' as u16);
+    let mut backslashes = 0usize;
+    for unit in arg.encode_wide() {
+        if unit == '\\' as u16 {
+            backslashes += 1;
+        } else if unit == '"' as u16 {
+            line.extend(std::iter::repeat_n('\\' as u16, backslashes * 2 + 1));
+            line.push(unit);
+            backslashes = 0;
+        } else {
+            line.extend(std::iter::repeat_n('\\' as u16, backslashes));
+            line.push(unit);
+            backslashes = 0;
+        }
+    }
+    line.extend(std::iter::repeat_n('\\' as u16, backslashes * 2));
+    line.push('"' as u16);
+}
+
+fn nul_terminated(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 /// Why a process could not be terminated.
@@ -410,9 +613,9 @@ pub fn start_kernel_elevated(args: &[String]) -> i32 {
         Err(_) => return HELPER_NOT_STOPPED,
     }
     match start(&exe, &kernel_args) {
-        // The child is dropped once its PID is read: it must outlive the helper,
-        // and an `std::process::Child` does not kill on drop.
-        Ok(child) => i32::try_from(child.id()).unwrap_or(HELPER_NOT_STARTED),
+        // The handle is dropped once its PID is read: the kernel must outlive the
+        // helper, and dropping the handle does not end the process.
+        Ok(child) => i32::try_from(child.pid()).unwrap_or(HELPER_NOT_STARTED),
         Err(_) => HELPER_NOT_STARTED,
     }
 }
@@ -481,7 +684,7 @@ pub fn replace_kernel_elevated(args: &[String]) -> i32 {
         return HELPER_NOT_STOPPED;
     }
     match start(&path, &start_args) {
-        Ok(child) => i32::try_from(child.id()).unwrap_or(HELPER_NOT_STARTED),
+        Ok(child) => i32::try_from(child.pid()).unwrap_or(HELPER_NOT_STARTED),
         Err(_) => HELPER_NOT_STARTED,
     }
 }
@@ -634,6 +837,8 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::process::{Command, Stdio};
 
     #[test]
     fn helper_takes_a_pid_and_nothing_else() {
@@ -809,6 +1014,62 @@ mod tests {
         assert!(
             matches!(outcome, Ok(())),
             "kill of an exited pid: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn an_argument_survives_the_round_trip_through_the_command_line() {
+        // `CommandLineToArgvW` is the parser Windows itself uses, and the one the
+        // helper reads a running kernel's arguments back with: what it returns has
+        // to be what was handed in, or a restart hands the kernel different
+        // arguments than the ones it is running with.
+        let args = [
+            "-d".to_string(),
+            r"C:\Program Files\mihomo\data".to_string(),
+            r#"--ext-ctl=127.0.0.1:9090"#.to_string(),
+            r#"-f"C:\my config.yaml""#.to_string(),
+            r"C:\trailing\".to_string(),
+            "plain".to_string(),
+            "空 格".to_string(),
+            String::new(),
+        ];
+        let line = kernel_command_line(Path::new(r"C:\Program Files\mihomo\mihomo.exe"), &args);
+        let parsed = parse_command_line(&String::from_utf16_lossy(&line[..line.len() - 1]));
+        assert_eq!(parsed[0], r"C:\Program Files\mihomo\mihomo.exe");
+        assert_eq!(parsed[1..], args);
+    }
+
+    #[test]
+    fn the_kernel_is_started_without_a_console_and_can_be_waited_for() {
+        // `start` is the only process launcher in the program, and it uses no
+        // `std::process::Command`: this drives the `CreateProcessW` path itself,
+        // quoting and working directory included.
+        let root = std::env::var("SystemRoot").expect("SystemRoot");
+        let cmd = PathBuf::from(root).join(r"System32\cmd.exe");
+        let mut child =
+            start(&cmd, &["/c".to_string(), "exit".to_string()]).expect("start cmd.exe");
+        assert!(child.pid() > 0);
+        child.wait().expect("wait for it to exit");
+    }
+
+    #[test]
+    fn a_kernel_handle_reports_running_until_it_is_killed() {
+        let child = Command::new("cmd.exe")
+            .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a long-lived process");
+        let mut child = KernelChild::adopt(child);
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "a live kernel is running"
+        );
+        child.kill().expect("end it");
+        child.wait().expect("it has to disappear");
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "a killed kernel is gone"
         );
     }
 }
