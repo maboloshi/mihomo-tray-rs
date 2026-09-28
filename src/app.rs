@@ -31,6 +31,8 @@ pub enum Command {
     Reload,
     /// Ask the kernel to restart itself through its own API.
     RestartKernel,
+    /// End the running kernel and start the one `tray.yml` describes.
+    ForceRestartKernel,
     /// Ask for the rights to stop a kernel that is not ours to end.
     StopKernelElevated,
     /// Re-read everything (used after actions handled on the UI thread).
@@ -139,6 +141,9 @@ impl App {
             Action::Unfix(group) => self.send(Command::Unfix(group.clone())),
             Action::Reload => self.send(Command::Reload),
             Action::RestartKernel => self.send(Command::RestartKernel),
+            // The kernel is replaced by this process, so nothing about it needs the
+            // controller: the command runs even when none could be resolved.
+            Action::ForceRestartKernel => self.send(Command::ForceRestartKernel),
             Action::OpenWebUi => {
                 // The entry is only clickable while the controller answers, and
                 // the refresh that proves that is the one that published this
@@ -448,10 +453,11 @@ fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
         return restart_kernel(worker);
     }
     let Some(client) = worker.client.as_ref() else {
-        // Without a controller the two process commands are still worth carrying
-        // out; everything else can only answer that there is nothing to talk to.
+        // Without a controller the process commands are still worth carrying out;
+        // everything else can only answer that there is nothing to talk to.
         return match command {
             Command::StopKernelElevated => stop_kernel_elevated(worker),
+            Command::ForceRestartKernel => force_restart_kernel(worker),
             Command::Refresh => None,
             _ => Some(i18n::t().error_controller_unset.to_string()),
         };
@@ -468,6 +474,8 @@ fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
         // Handled before this point, so that the client can be replaced while it
         // happens.
         Command::RestartKernel => Ok(()),
+        // Process work, not a controller call.
+        Command::ForceRestartKernel => return force_restart_kernel(worker),
     };
     result.err()
 }
@@ -529,6 +537,113 @@ fn restart_kernel(worker: &mut Worker) -> Option<String> {
 fn forget_kernel_process(worker: &Worker) {
     state::write_kernel_pid(worker.state, None);
     let _ = state::take_kernel_child(worker.kernel);
+}
+
+/// Stop the running kernel and start the one `tray.yml` describes.
+///
+/// This is the answer to "the kernel that is running is not the one this program
+/// would start": another launcher's kernel, one left by an older session, or one
+/// started by hand with its own `-d`/`-f`. Nothing can make such a process adopt
+/// the settings in `tray.yml` — a command line is handed over when the process is
+/// created — so it is ended and replaced, which is what makes every later answer
+/// about the kernel come from `tray.yml`.
+///
+/// The kernel that gets ended is not necessarily one this program started, so it
+/// is identified first: one whose image is not the configured one is replaced only
+/// after the user confirms, and one whose image cannot be read at all runs with
+/// more rights than this process has. `taskkill /IM` is never used — only the
+/// process that was picked and the launcher family around it.
+fn force_restart_kernel(worker: &mut Worker) -> Option<String> {
+    // Without a configured path there is nothing to start, and nothing to match the
+    // running kernel against either.
+    let Some(path) = state::kernel_path(worker.kernel) else {
+        return Some(i18n::t().error_no_kernel_path.to_string());
+    };
+    let running = proc::list_mihomo();
+    let recorded = state::read(worker.state).kernel_pid;
+    let Some(picked) = pick_kernel(&running, recorded, Some(path.as_path()))
+        .and_then(|pid| running.iter().find(|process| process.pid == pid))
+    else {
+        // The entry is only clickable while a kernel is running: this is the race
+        // between that and the click.
+        return Some(i18n::t().error_no_matching_kernel.to_string());
+    };
+    // An unreadable image is what a kernel with more rights looks like from here,
+    // and there is no way to end one from this process.
+    if picked.denied {
+        return Some(i18n::t().error_kernel_needs_admin.to_string());
+    }
+    // The PID the elevated helper reported, or an image this program would start:
+    // either way the kernel is ours, and ending it needs no question.
+    let ours = recorded == Some(picked.pid) || proc::same_image(&picked.path, &path);
+    if !ours && !confirm_foreign_kernel(worker, picked) {
+        // Saying no is not a failure: nothing happened, and the menu goes on
+        // showing the kernel that is still running.
+        return None;
+    }
+    show_note(
+        worker.state,
+        worker.hwnd,
+        Some(i18n::t().status_force_restarting.to_string()),
+    );
+    let outcome = replace_kernel(worker, &path, picked.pid);
+    show_note(worker.state, worker.hwnd, None);
+    outcome
+}
+
+/// The replacement itself, with the "what is going on" note already up.
+fn replace_kernel(worker: &mut Worker, path: &Path, pid: u32) -> Option<String> {
+    match proc::stop_kernel(Some(pid), path) {
+        Err(error) => return Some(error),
+        // Being refused is a right this process does not have, not a failure.
+        Ok(outcome) if outcome.denied > 0 => {
+            return Some(i18n::t().error_kernel_needs_admin.to_string());
+        }
+        Ok(_) => {}
+    }
+    // A kernel that survived a stop which looked successful would end up next to
+    // the replacement, both of them bound to the same ports.
+    if proc::list_mihomo().iter().any(|process| process.pid == pid) {
+        return Some(i18n::t().error_kernel_still_running.to_string());
+    }
+    // The process is gone, so what was recorded for it is not evidence about the
+    // kernel that is about to run.
+    forget_kernel_process(worker);
+    let args = match discover::launch_args(worker.settings) {
+        Ok(args) => args,
+        Err(error) => return Some(error),
+    };
+    match proc::start(path, &args) {
+        Ok(child) => state::write_kernel_child(worker.kernel, child),
+        Err(error) => return Some(error),
+    }
+    // The kernel that is running now is this program's, so the controller is
+    // resolved from it: that resolution is the whole point of the action. A
+    // controller the new kernel does not serve must not be kept — it belonged to
+    // the kernel that was just replaced.
+    worker.client = discover::find_controller(worker.settings).ok();
+    worker.version.clear();
+    // Nothing to wait for without a controller: the refresh loop reports what is
+    // missing, and the kernel itself is up.
+    let client = worker.client.as_ref()?;
+    if wait_for_controller(Some(client)) {
+        None
+    } else {
+        Some(i18n::t().error_restart_kernel_silent.to_string())
+    }
+}
+
+/// Ask before a kernel this program did not start is ended.
+fn confirm_foreign_kernel(worker: &Worker, process: &proc::Process) -> bool {
+    let messages = i18n::t();
+    win::confirm(
+        worker.hwnd as HWND,
+        &messages.menu_force_restart_kernel,
+        &messages.confirm_force_restart(
+            &process.path.display().to_string(),
+            &process.pid.to_string(),
+        ),
+    )
 }
 
 /// Turn TUN on or off.

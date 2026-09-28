@@ -244,6 +244,25 @@ pub fn fatal(message: &str) {
     }
 }
 
+/// Whether the user agrees to something that cannot be undone.
+///
+/// Called from the worker thread, like the UAC prompt, so the UI thread keeps
+/// pumping messages while the question is up. The default button is "no": a
+/// stray Enter, or closing the box, refuses rather than proceeds.
+pub fn confirm(hwnd: HWND, title: &str, message: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_YESNO, MessageBoxW,
+    };
+    unsafe {
+        MessageBoxW(
+            hwnd,
+            wide(message).as_ptr(),
+            wide(title).as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        ) == IDYES
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         let app = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;

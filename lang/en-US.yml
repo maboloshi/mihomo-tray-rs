@@ -32,6 +32,7 @@ menu:
   autostart: Start with Windows
   reload: Reload config
   restart_kernel: Restart kernel
+  force_restart_kernel: Force restart kernel
   web_ui: Open web dashboard
   more: More
   exit: Exit
@@ -46,6 +47,7 @@ status:
   starting_kernel: "Starting the kernel…"
   kernel_silent: "The kernel has not answered yet; still waiting"
   restarting_kernel: "Restarting the kernel…"
+  force_restarting: "Stopping the kernel and starting it from tray.yml…"
   elevating_kernel: "Restarting the kernel as administrator…"
   elevating_stop: "Stopping the kernel as administrator…"
 
@@ -92,6 +94,7 @@ error:
   tun_ineffective: TUN did not take effect (usually needs administrator rights)
   kernel_needs_admin: "The kernel runs with administrator rights and cannot be stopped by this program"
   restart_kernel_silent: "The kernel did not answer after the restart"
+  kernel_still_running: "The kernel did not stop, so the one from tray.yml was not started"
   kernel_args: "Could not read the kernel's own command line, so it was not restarted"
   message_window: Failed to create the message window
   open_web_ui: "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})"
@@ -99,3 +102,6 @@ error:
   set_proxy_enable: "Failed to set ProxyEnable: {error}"
   set_proxy_server: "Failed to set ProxyServer: {error}"
   set_proxy_override: "Failed to set ProxyOverride: {error}"
+
+confirm:
+  force_restart: "This stops the kernel {path} (PID {pid}) and starts the one this program starts from tray.yml. Continue?"

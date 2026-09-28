@@ -29,6 +29,8 @@ pub enum Action {
     Reload,
     /// Restart the kernel process, keeping its own command line.
     RestartKernel,
+    /// End the running kernel and start the one `tray.yml` describes.
+    ForceRestartKernel,
     /// Open the kernel's dashboard (or a hosted one pointed at it) in the
     /// browser. The tray itself has no settings window, so this is where the
     /// rest of mihomo is configured.
@@ -148,7 +150,22 @@ impl Menu {
             false,
             ready,
         );
-        builder.popup(root, &messages.menu_more, more_menu, ready, false);
+        // Replacing the kernel is process work: it needs a kernel that is running,
+        // not a controller to talk to.
+        builder.item(
+            more_menu,
+            &messages.menu_force_restart_kernel,
+            Action::ForceRestartKernel,
+            false,
+            snapshot.kernel_running,
+        );
+        builder.popup(
+            root,
+            &messages.menu_more,
+            more_menu,
+            ready || snapshot.kernel_running,
+            false,
+        );
 
         builder.separator(root);
         let exit_menu = builder.new_menu();
@@ -710,6 +727,7 @@ mod tests {
             vec![
                 messages.menu_reload.to_string(),
                 messages.menu_restart_kernel.to_string(),
+                messages.menu_force_restart_kernel.to_string(),
             ]
         );
         assert!(
@@ -717,14 +735,35 @@ mod tests {
             "reload config is a submenu entry now, not a root one"
         );
 
-        // Reloading needs a controller, so without one the submenu is out of reach
-        // as a whole.
+        // Reloading and restarting need a controller, replacing the kernel needs a
+        // kernel that is running: with neither, the submenu is out of reach.
         let mut offline = snapshot(Vec::new());
         offline.controller_ok = false;
         let offline = Menu::build(&offline, &Settings::default());
         let position = submenu_position(offline.handle, &messages.menu_more).expect("more submenu");
         let state = unsafe { GetMenuState(offline.handle, position as u32, MF_BYPOSITION) };
-        assert_ne!(state & MF_GRAYED, 0, "no controller, nothing to reload");
+        assert_ne!(state & MF_GRAYED, 0, "no controller and no kernel");
+
+        // A kernel that is running can be replaced without a controller, so the
+        // submenu stays reachable and only the controller entries are grayed.
+        let mut kernel_only = snapshot(Vec::new());
+        kernel_only.controller_ok = false;
+        kernel_only.kernel_running = true;
+        let kernel_only = Menu::build(&kernel_only, &Settings::default());
+        let position =
+            submenu_position(kernel_only.handle, &messages.menu_more).expect("more submenu");
+        let state = unsafe { GetMenuState(kernel_only.handle, position as u32, MF_BYPOSITION) };
+        assert_eq!(state & MF_GRAYED, 0, "a kernel is there to be replaced");
+        let more = find_submenu(kernel_only.handle, &messages.menu_more);
+        for (index, action) in kernel_only.actions.iter().enumerate() {
+            let id = (ID_BASE + index) as u32;
+            let grayed = unsafe { GetMenuState(more, id, MF_BYCOMMAND) } & MF_GRAYED != 0;
+            match action {
+                Action::Reload | Action::RestartKernel => assert!(grayed, "{action:?}"),
+                Action::ForceRestartKernel => assert!(!grayed, "{action:?}"),
+                _ => {}
+            }
+        }
     }
 
     #[test]
