@@ -142,6 +142,12 @@ pub fn ensure_default_file(path: &Path, text: &str) {
     let _ = std::fs::write(path, text);
 }
 
+/// Upper bound on `groups.page_size`. A page is a submenu of the group's members,
+/// and the entry budget caps how many of those survive anyway, so a larger number
+/// buys nothing while an absurd one (`999999999`) would defeat the paging it was
+/// meant to configure. `0` keeps its documented meaning: no paging.
+const MAX_PAGE_SIZE: usize = 1000;
+
 fn parse(text: &str) -> Settings {
     let mut s = Settings::default();
     let mut section = String::new();
@@ -176,7 +182,9 @@ fn parse(text: &str) -> Settings {
             ("groups", "order") => s.groups_order = parse_list(value),
             ("groups", "include") => s.groups_include = parse_list(value),
             ("groups", "exclude") => s.groups_exclude = parse_list(value),
-            ("groups", "page_size") => s.groups_page_size = value.parse().unwrap_or(0),
+            ("groups", "page_size") => {
+                s.groups_page_size = value.parse().unwrap_or(0).min(MAX_PAGE_SIZE)
+            }
             ("ui", "web_url") => s.web_url = unquote(value),
             ("ui", "poll_interval_ms") => {
                 s.poll_interval_ms = value.parse().unwrap_or(3000).clamp(500, 60_000)
@@ -401,5 +409,20 @@ ui:
     fn a_comma_inside_quotes_stays_in_its_item() {
         let s = parse("proxy:\n  bypass: [\"a,b\", c]\n");
         assert_eq!(s.proxy_bypass, vec!["a,b", "c"]);
+    }
+
+    #[test]
+    fn a_page_size_out_of_range_is_clamped() {
+        // `0` is documented as "no paging" and stays exactly that.
+        assert_eq!(parse("groups:\n  page_size: 0\n").groups_page_size, 0);
+        assert_eq!(parse("groups:\n  page_size: 50\n").groups_page_size, 50);
+        // The same bound the other intervals get: nothing pathological reaches the
+        // code that splits a group into pages.
+        assert_eq!(
+            parse("groups:\n  page_size: 999999999\n").groups_page_size,
+            MAX_PAGE_SIZE
+        );
+        // Not a number is not a page size; it keeps the documented default.
+        assert_eq!(parse("groups:\n  page_size: many\n").groups_page_size, 0);
     }
 }

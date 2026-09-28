@@ -147,6 +147,14 @@ pub fn list_mihomo() -> Vec<Process> {
     found
 }
 
+/// The first buffer size tried for a process image path, in UTF-16 units. Large
+/// enough for every ordinary path; the call site grows it if a longer one ever
+/// appears.
+const IMAGE_PATH_CHARS: u32 = 1024;
+/// Upper bound for that growth: the longest path Windows itself accepts, so a
+/// misbehaving call cannot turn this into an allocation loop.
+const IMAGE_PATH_MAX_CHARS: u32 = 32 * 1024;
+
 /// The image path of `pid`, and whether it could not be verified at all.
 ///
 /// The elevated kernel is the case that matters: the limited-information handle
@@ -164,17 +172,46 @@ fn image_path(pid: u32) -> (PathBuf, bool) {
         if handle.is_null() {
             return (PathBuf::new(), true);
         }
-        let mut buffer = [0u16; 520];
-        let mut size = buffer.len() as u32;
-        let ok = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size);
+        // A fixed buffer would file a path longer than it as "unverifiable", and
+        // that verdict later costs an extra UAC prompt. The call does not report
+        // the length it wanted, so the buffer is grown until it fits: the first
+        // attempt covers every ordinary path, and the loop exists for the rest.
+        let path = read_image_path(handle, IMAGE_PATH_CHARS);
         CloseHandle(handle);
-        if ok == 0 {
-            return (PathBuf::new(), true);
+        path
+    }
+}
+
+/// Read the image path of `handle` into a buffer of `first_size` UTF-16 units,
+/// growing it while the call keeps failing.
+///
+/// The call does not distinguish "the buffer was too small" from "the process
+/// refused to name its image". A local process opened with
+/// `PROCESS_QUERY_LIMITED_INFORMATION` only fails the first way, and the caller
+/// treats a final failure as unverifiable either way, so growing the buffer and
+/// asking once more is the safe reading.
+fn read_image_path(handle: HANDLE, first_size: u32) -> (PathBuf, bool) {
+    let mut size = first_size.max(1);
+    unsafe {
+        loop {
+            let mut buffer = vec![0u16; size as usize];
+            let mut length = size;
+            let ok = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length);
+            if ok != 0 {
+                // `length` counts the terminating NUL, which is not part of the path.
+                let end = (length as usize).min(buffer.len());
+                return (
+                    PathBuf::from(String::from_utf16_lossy(&buffer[..end])),
+                    false,
+                );
+            }
+            if size >= IMAGE_PATH_MAX_CHARS {
+                // Not a length problem: an elevated process, or a path past what
+                // Windows itself accepts.
+                return (PathBuf::new(), true);
+            }
+            size = size.saturating_mul(2).min(IMAGE_PATH_MAX_CHARS);
         }
-        (
-            PathBuf::from(String::from_utf16_lossy(&buffer[..size as usize])),
-            false,
-        )
     }
 }
 
@@ -625,6 +662,46 @@ mod tests {
         assert!(!argv.is_empty(), "argv was empty");
         let exe = PathBuf::from(&argv[0]);
         assert!(exe.is_file(), "argv[0] was not an image path: {exe:?}");
+    }
+
+    #[test]
+    fn a_process_image_path_is_read_whatever_its_length() {
+        // Exercised on a process whose image really is there, because the failure
+        // this guards against is precisely "could not be verified": without the
+        // readable path a real kernel only some of these calls can name would be
+        // filed as unverifiable and cost an extra UAC prompt.
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 > nul"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("start cmd.exe");
+        let pid = child.id();
+        let listed = (0..40).any(|_| {
+            let (path, denied) = image_path(pid);
+            if !denied && path.to_string_lossy().to_lowercase().ends_with("cmd.exe") {
+                true
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            }
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(listed, "cmd.exe (pid {pid}) could not be named");
+    }
+
+    #[test]
+    fn an_image_path_longer_than_the_buffer_still_comes_back() {
+        // `IMAGE_PATH_CHARS` is a starting size, not a limit: a path that does not
+        // fit is asked for again with more room instead of being reported as
+        // unverifiable.
+        let handle =
+            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, std::process::id()) };
+        assert!(!handle.is_null(), "cannot open this process");
+        let path = read_image_path(handle, 4);
+        unsafe { CloseHandle(handle) };
+        assert!(!path.1, "the path was not read at all: {path:?}");
+        assert!(path.0.is_file(), "{path:?} is not the test binary");
     }
 
     #[test]
