@@ -105,6 +105,8 @@ messages! {
     error_controller_missing_tpl => "error.controller_missing",
     error_controller_other_family_tpl => "error.controller_other_family",
     error_controller_invalid_tpl => "error.controller_invalid",
+    error_controller_tls_tpl => "error.controller_tls",
+    error_single_instance => "error.single_instance",
     error_read_settings_tpl => "error.read_settings",
     error_window_create_tpl => "error.window_create",
     error_no_kernel_path => "error.no_kernel_path",
@@ -148,11 +150,32 @@ impl Messages {
     /// Fill `{hole}` placeholders. An unknown hole stays visible on purpose: a
     /// translation that lost its placeholder should be obvious in the UI rather
     /// than silently drop the value it was meant to carry.
+    ///
+    /// The template is walked once and the replacement is appended, never
+    /// rescanned: a value that happens to contain a placeholder — a proxy group
+    /// literally named `{kind}` — is shown as it is instead of being filled in
+    /// with whatever the next argument holds.
     fn fill(&self, template: &str, args: &[(&str, &str)]) -> String {
-        let mut text = template.to_string();
-        for (name, value) in args {
-            text = text.replace(&format!("{{{name}}}"), value);
+        let mut text = String::with_capacity(template.len());
+        let mut rest = template;
+        while let Some(start) = rest.find('{') {
+            let Some(end) = rest[start..].find('}') else {
+                break;
+            };
+            text.push_str(&rest[..start]);
+            let name = &rest[start + 1..start + end];
+            match args.iter().find(|(hole, _)| *hole == name) {
+                Some((_, value)) => text.push_str(value),
+                None => {
+                    // Unknown: keep the braces so a broken translation is visible.
+                    text.push('{');
+                    text.push_str(name);
+                    text.push('}');
+                }
+            }
+            rest = &rest[start + end + 1..];
         }
+        text.push_str(rest);
         text
     }
 
@@ -263,6 +286,13 @@ impl Messages {
 
     pub fn error_controller_invalid(&self, address: &str) -> String {
         self.fill(&self.error_controller_invalid_tpl, &[("address", address)])
+    }
+
+    /// A controller address written with an `https://` scheme. This program has no
+    /// TLS client at all, so the scheme is refused rather than silently downgraded
+    /// to the plaintext request it would otherwise become.
+    pub fn error_controller_tls(&self, address: &str) -> String {
+        self.fill(&self.error_controller_tls_tpl, &[("address", address)])
     }
 
     pub fn error_json_parse(&self, error: &str) -> String {
@@ -386,6 +416,12 @@ impl Messages {
             error_controller_invalid_tpl: Cow::Borrowed(
                 "控制器地址无效: {address}（应为 host:port 形式）",
             ),
+            error_controller_tls_tpl: Cow::Borrowed(
+                "控制器地址 {address} 用的是 https：本程序没有 TLS 客户端，不会降级为明文连接；请改用 http 或自行套隧道",
+            ),
+            error_single_instance: Cow::Borrowed(
+                "mihomo-tray 已在运行（图标在通知区域，Windows 11 上可能在溢出区里）",
+            ),
             error_window_create_tpl: Cow::Borrowed("启动失败: {error}"),
             error_no_kernel_path: Cow::Borrowed("未找到 mihomo.exe 路径，无法确认要停止的进程"),
             error_no_matching_kernel: Cow::Borrowed("未找到与本程序配置匹配的 mihomo 进程"),
@@ -504,6 +540,12 @@ impl Messages {
             ),
             error_controller_invalid_tpl: Cow::Borrowed(
                 "Invalid controller address: {address} (expected host:port)",
+            ),
+            error_controller_tls_tpl: Cow::Borrowed(
+                "The controller address {address} uses https: this program has no TLS client and will not fall back to a plaintext connection; use http or a tunnel of your own",
+            ),
+            error_single_instance: Cow::Borrowed(
+                "mihomo-tray is already running (the icon is in the notification area, possibly in the overflow on Windows 11)",
             ),
             error_window_create_tpl: Cow::Borrowed("Startup failed: {error}"),
             error_no_kernel_path: Cow::Borrowed(
@@ -858,6 +900,27 @@ mod tests {
         assert_eq!(
             messages.error_controller_unreachable("127.0.0.1:9090", "timeout"),
             "控制器 127.0.0.1:9090 不可达: timeout"
+        );
+    }
+
+    #[test]
+    fn a_value_that_looks_like_a_hole_is_not_filled_in() {
+        let messages = Messages::zh_cn();
+        // A group really can be called `{kind}`: the replacement happens once, in
+        // template order, so the name reaches the label as the user wrote it
+        // instead of being replaced by the value of the next argument.
+        assert_eq!(
+            messages.menu_group_label("{kind}", "URLTest"),
+            "{kind} (URLTest)"
+        );
+        assert_eq!(
+            messages.error_controller_unreachable("127.0.0.1:9090", "{address}"),
+            "控制器 127.0.0.1:9090 不可达: {address}"
+        );
+        // A hole no argument fills stays visible, braces included.
+        assert_eq!(
+            messages.error_controller_invalid("{address}"),
+            "控制器地址无效: {address}（应为 host:port 形式）"
         );
     }
 

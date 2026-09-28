@@ -71,6 +71,8 @@ error:
   controller_missing: "The kernel does not serve external-controller ({path} has no such setting)"
   controller_other_family: "The kernel only serves a TLS/unix/pipe controller ({path}); this program speaks http"
   controller_invalid: "Invalid controller address: {address} (expected host:port)"
+  controller_tls: "The controller address {address} uses https: this program has no TLS client and will not fall back to a plaintext connection; use http or a tunnel of your own"
+  single_instance: "mihomo-tray is already running (the icon is in the notification area, possibly in the overflow on Windows 11)"
   window_create: "Startup failed: {error}"
   no_kernel_path: "No mihomo.exe path is known, cannot tell which process to stop"
   no_matching_kernel: "No mihomo process matches this program's configuration"
