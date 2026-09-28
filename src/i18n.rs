@@ -130,9 +130,11 @@ messages! {
     error_kernel_needs_admin => "error.kernel_needs_admin",
     error_restart_kernel_silent => "error.restart_kernel_silent",
     error_kernel_still_running => "error.kernel_still_running",
+    error_helper_settings => "error.helper_settings",
 
     // Questions asked before something that cannot be undone.
     confirm_force_restart_tpl => "confirm.force_restart",
+    confirm_image_unreadable => "confirm.image_unreadable",
     error_kernel_args => "error.kernel_args",
     error_message_window => "error.message_window",
     error_open_web_ui_tpl => "error.open_web_ui",
@@ -423,6 +425,10 @@ impl Messages {
             error_kernel_still_running: Cow::Borrowed(
                 "内核没有停下来，没有按 tray.yml 启动新的内核",
             ),
+            error_helper_settings: Cow::Borrowed(
+                "提权副本无法从 tray.yml 得到要启动的内核，未替换内核（只有 exe 旁的便携那份一定可见）",
+            ),
+            confirm_image_unreadable: Cow::Borrowed("（映像无法读取）"),
         }
     }
 
@@ -560,6 +566,12 @@ impl Messages {
             confirm_force_restart_tpl: Cow::Borrowed(
                 "This stops the kernel {path} (PID {pid}) and starts the one this program \
                  starts from tray.yml. Continue?",
+            ),
+            confirm_image_unreadable: Cow::Borrowed("(image cannot be read)"),
+            error_helper_settings: Cow::Borrowed(
+                "The elevated helper could not get the kernel to start from tray.yml, so the \
+                 kernel was not replaced (only the portable file next to the executable is \
+                 always visible)",
             ),
         }
     }

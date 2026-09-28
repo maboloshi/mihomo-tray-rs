@@ -95,6 +95,7 @@ error:
   kernel_needs_admin: "The kernel runs with administrator rights and cannot be stopped by this program"
   restart_kernel_silent: "The kernel did not answer after the restart"
   kernel_still_running: "The kernel did not stop, so the one from tray.yml was not started"
+  helper_settings: "The elevated helper could not get the kernel to start from tray.yml, so the kernel was not replaced (only the portable file next to the executable is always visible)"
   kernel_args: "Could not read the kernel's own command line, so it was not restarted"
   message_window: Failed to create the message window
   open_web_ui: "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})"
@@ -105,3 +106,4 @@ error:
 
 confirm:
   force_restart: "This stops the kernel {path} (PID {pid}) and starts the one this program starts from tray.yml. Continue?"
+  image_unreadable: "(image cannot be read)"

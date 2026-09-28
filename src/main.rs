@@ -55,13 +55,16 @@ fn main() {
     }
 }
 
-/// The two elevated-helper command lines `win::elevate` builds; every other
-/// command line belongs to the tray.
+/// The elevated-helper command lines `win::elevate` builds; every other command
+/// line belongs to the tray.
 fn run_kernel_helper() -> Option<i32> {
     let args = mihomo::proc::own_command_line();
     match args.get(1)?.as_str() {
         mihomo::proc::KERNEL_START_SWITCH => Some(mihomo::proc::start_kernel_elevated(&args[2..])),
         mihomo::proc::KERNEL_STOP_SWITCH => Some(mihomo::proc::stop_kernel_elevated(&args[2..])),
+        mihomo::proc::KERNEL_REPLACE_SWITCH => {
+            Some(mihomo::proc::replace_kernel_elevated(&args[2..]))
+        }
         _ => None,
     }
 }

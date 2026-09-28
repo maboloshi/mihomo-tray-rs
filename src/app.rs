@@ -550,9 +550,10 @@ fn forget_kernel_process(worker: &Worker) {
 ///
 /// The kernel that gets ended is not necessarily one this program started, so it
 /// is identified first: one whose image is not the configured one is replaced only
-/// after the user confirms, and one whose image cannot be read at all runs with
-/// more rights than this process has. `taskkill /IM` is never used — only the
-/// process that was picked and the launcher family around it.
+/// after the user confirms, and one whose image cannot be read at all — a kernel
+/// with more rights than this process has — is ended and replaced by the elevated
+/// helper. `taskkill /IM` is never used: only the process that was picked and the
+/// launcher family around it.
 fn force_restart_kernel(worker: &mut Worker) -> Option<String> {
     // Without a configured path there is nothing to start, and nothing to match the
     // running kernel against either.
@@ -568,14 +569,12 @@ fn force_restart_kernel(worker: &mut Worker) -> Option<String> {
         // between that and the click.
         return Some(i18n::t().error_no_matching_kernel.to_string());
     };
-    // An unreadable image is what a kernel with more rights looks like from here,
-    // and there is no way to end one from this process.
-    if picked.denied {
-        return Some(i18n::t().error_kernel_needs_admin.to_string());
-    }
+    // An unreadable image proves nothing either way — it is what a kernel with more
+    // rights looks like from here — so such a kernel is never treated as ours.
     // The PID the elevated helper reported, or an image this program would start:
     // either way the kernel is ours, and ending it needs no question.
-    let ours = recorded == Some(picked.pid) || proc::same_image(&picked.path, &path);
+    let ours =
+        recorded == Some(picked.pid) || (!picked.denied && proc::same_image(&picked.path, &path));
     if !ours && !confirm_foreign_kernel(worker, picked) {
         // Saying no is not a failure: nothing happened, and the menu goes on
         // showing the kernel that is still running.
@@ -586,24 +585,33 @@ fn force_restart_kernel(worker: &mut Worker) -> Option<String> {
         worker.hwnd,
         Some(i18n::t().status_force_restarting.to_string()),
     );
-    let outcome = replace_kernel(worker, &path, picked.pid);
+    let outcome = replace_kernel(worker, &path, picked);
     show_note(worker.state, worker.hwnd, None);
     outcome
 }
 
 /// The replacement itself, with the "what is going on" note already up.
-fn replace_kernel(worker: &mut Worker, path: &Path, pid: u32) -> Option<String> {
-    match proc::stop_kernel(Some(pid), path) {
+fn replace_kernel(worker: &mut Worker, path: &Path, picked: &proc::Process) -> Option<String> {
+    // A kernel whose image cannot be read runs with more rights than this process
+    // has, so the helper is the only thing that can end it — and it has to start
+    // the replacement as well, or the new kernel would come back without the rights
+    // the old one had.
+    if picked.denied {
+        return elevate_replacement(worker, picked.pid);
+    }
+    match proc::stop_kernel(Some(picked.pid), path) {
         Err(error) => return Some(error),
-        // Being refused is a right this process does not have, not a failure.
-        Ok(outcome) if outcome.denied > 0 => {
-            return Some(i18n::t().error_kernel_needs_admin.to_string());
-        }
+        // The image was readable and the permission to end it was not there: the
+        // same answer as above, reached from the other side.
+        Ok(outcome) if outcome.denied > 0 => return elevate_replacement(worker, picked.pid),
         Ok(_) => {}
     }
     // A kernel that survived a stop which looked successful would end up next to
     // the replacement, both of them bound to the same ports.
-    if proc::list_mihomo().iter().any(|process| process.pid == pid) {
+    if proc::list_mihomo()
+        .iter()
+        .any(|process| process.pid == picked.pid)
+    {
         return Some(i18n::t().error_kernel_still_running.to_string());
     }
     // The process is gone, so what was recorded for it is not evidence about the
@@ -617,16 +625,52 @@ fn replace_kernel(worker: &mut Worker, path: &Path, pid: u32) -> Option<String> 
         Ok(child) => state::write_kernel_child(worker.kernel, child),
         Err(error) => return Some(error),
     }
-    // The kernel that is running now is this program's, so the controller is
-    // resolved from it: that resolution is the whole point of the action. A
-    // controller the new kernel does not serve must not be kept — it belonged to
-    // the kernel that was just replaced.
-    worker.client = discover::find_controller(worker.settings).ok();
+    adopt_new_kernel(worker)
+}
+
+/// Have the elevated helper do both halves of the replacement.
+///
+/// The helper is handed the PID of the kernel to end and nothing else: the image,
+/// the configuration and the arguments of the replacement are read by the helper
+/// itself, so it can never be talked into starting an image of the caller's
+/// choosing (`docs/ROADMAP.md`, hard constraint 9).
+fn elevate_replacement(worker: &mut Worker, pid: u32) -> Option<String> {
+    let params = win::elevate::kernel_replace_params(pid);
+    let code = match win::elevate::run_self_elevated(&params) {
+        Ok(code) => code,
+        Err(error) => return Some(error),
+    };
+    if code < 0 {
+        return Some(helper_failure(code));
+    }
+    // The answer is the kernel the helper started: an elevated kernel's image path
+    // cannot be read from here, so the PID is the identity this process keeps.
+    forget_kernel_process(worker);
+    state::write_kernel_pid(worker.state, (code > 0).then_some(code as u32));
+    adopt_new_kernel(worker)
+}
+
+/// Talk to the kernel that is running now: resolve the controller from it, and wait
+/// briefly for it to answer.
+///
+/// The resolution is the point of a replacement — the kernel is this program's own
+/// now, so the controller comes from `tray.yml` and from the kernel itself. A
+/// controller the new kernel does not serve must not be kept: it belonged to the
+/// kernel that was just replaced.
+fn adopt_new_kernel(worker: &mut Worker) -> Option<String> {
+    // A replacement may be how a new binary is picked up.
     worker.version.clear();
-    // Nothing to wait for without a controller: the refresh loop reports what is
-    // missing, and the kernel itself is up.
-    let client = worker.client.as_ref()?;
-    if wait_for_controller(Some(client)) {
+    match discover::find_controller(worker.settings) {
+        Ok(client) => worker.client = Some(client),
+        // The kernel is up but there is nothing to ask it. Reporting why is more
+        // useful than a replacement that reports success and cannot be used — and
+        // the old client must go with the kernel it was resolved for.
+        Err(error) => {
+            worker.client = None;
+            return Some(error);
+        }
+    }
+    if wait_for_controller(worker.client.as_ref()) {
         None
     } else {
         Some(i18n::t().error_restart_kernel_silent.to_string())
@@ -636,13 +680,17 @@ fn replace_kernel(worker: &mut Worker, path: &Path, pid: u32) -> Option<String> 
 /// Ask before a kernel this program did not start is ended.
 fn confirm_foreign_kernel(worker: &Worker, process: &proc::Process) -> bool {
     let messages = i18n::t();
+    // There is no path to name for a process whose image could not be read, and
+    // saying so is more honest than an empty path in the question.
+    let path = if process.denied {
+        messages.confirm_image_unreadable.to_string()
+    } else {
+        process.path.display().to_string()
+    };
     win::confirm(
         worker.hwnd as HWND,
         &messages.menu_force_restart_kernel,
-        &messages.confirm_force_restart(
-            &process.path.display().to_string(),
-            &process.pid.to_string(),
-        ),
+        &messages.confirm_force_restart(&path, &process.pid.to_string()),
     )
 }
 
@@ -748,6 +796,7 @@ fn helper_failure(code: i32) -> String {
         proc::HELPER_DENIED => messages.error_kernel_needs_admin.to_string(),
         proc::HELPER_UNREADABLE => messages.error_kernel_args.to_string(),
         proc::HELPER_NOT_STOPPED => messages.error_no_matching_kernel.to_string(),
+        proc::HELPER_NO_SETTINGS => messages.error_helper_settings.to_string(),
         _ => messages.error_elevated_kernel_failed.to_string(),
     }
 }

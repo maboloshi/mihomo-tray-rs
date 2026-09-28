@@ -47,6 +47,16 @@ pub fn kernel_stop_params(pid: u32) -> String {
     format!("{} {pid}", proc::KERNEL_STOP_SWITCH)
 }
 
+/// The helper's parameters for replacing a kernel the tray has no rights over.
+///
+/// The PID is the whole message, as everywhere else. What to start cannot come
+/// from here even in principle: the point of this helper is that the running
+/// kernel's command line is *not* the one this program would use, so the helper
+/// reads `tray.yml` itself.
+pub fn kernel_replace_params(pid: u32) -> String {
+    format!("{} {pid}", proc::KERNEL_REPLACE_SWITCH)
+}
+
 /// Run this executable again through the UAC prompt and wait for it to finish.
 /// The helper's exit code is returned as-is; `Err` means it never ran to a
 /// result, which is what a cancelled prompt looks like.

@@ -17,6 +17,9 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
 use crate::i18n;
+use crate::settings;
+
+use super::discover;
 
 const KERNEL_EXE: &str = "mihomo.exe";
 /// `OpenProcess` failing with this is how a higher-integrity process says "not
@@ -31,18 +34,25 @@ const TERMINATE_WAIT_MS: u32 = 5_000;
 
 /// Command-line switches that turn this executable into the elevated helper: one
 /// for TUN (replace the kernel with an elevated one), one for stopping a kernel
-/// the tray has no rights over. `main` handles them before the single-instance
-/// guard, so the helper is a second process of this same binary.
+/// the tray has no rights over, and one for replacing a kernel the tray has no
+/// rights over. `main` handles them before the single-instance guard, so the
+/// helper is a second process of this same binary.
 ///
-/// Both switches take exactly one argument, the PID of the running `mihomo.exe`
+/// Every switch takes exactly one argument, the PID of the running `mihomo.exe`
 /// to work on. The image and the arguments of that kernel are read out of the
 /// process itself, never handed in on the command line: a helper that could be
 /// told which image to start would be a general "run this as administrator"
 /// primitive, and a kernel's own command line is also the only faithful source
 /// for flags that were never in `tray.yml` (an `-ext-ctl` on the command line,
 /// an unusual `-f`, and so on).
+///
+/// The replacing switch is the one exception to "the replacement is a copy of the
+/// running kernel", which is exactly what it is for: the replacement's image and
+/// arguments are the ones in `tray.yml`, read by the helper itself for the same
+/// reason.
 pub const KERNEL_START_SWITCH: &str = "--kernel-start-elevated";
 pub const KERNEL_STOP_SWITCH: &str = "--kernel-stop-elevated";
+pub const KERNEL_REPLACE_SWITCH: &str = "--kernel-replace-elevated";
 
 /// Helper exit codes: the start helper answers with the PID of the kernel it
 /// started, which is positive by construction, so every failure is negative.
@@ -60,6 +70,9 @@ pub const HELPER_DENIED: i32 = -5;
 /// The kernel's own command line could not be read, so it cannot be restarted
 /// the way it was running.
 pub const HELPER_UNREADABLE: i32 = -6;
+/// `tray.yml` could not be read, or does not say which kernel to start: the
+/// replacing helper has nothing to start.
+pub const HELPER_NO_SETTINGS: i32 = -7;
 
 #[derive(Debug, Clone)]
 pub struct Process {
@@ -384,6 +397,55 @@ pub fn stop_kernel_elevated(args: &[String]) -> i32 {
         Ok(outcome) if outcome.denied > 0 => HELPER_DENIED,
         Ok(_) => HELPER_NOT_STOPPED,
         Err(_) => HELPER_NOT_STOPPED,
+    }
+}
+
+/// Body of the replacing helper: `args` is `[kernel pid]`.
+///
+/// The counterpart of [`start_kernel_elevated`], for the case that motivated it
+/// being different: the kernel that is running is not the one this program would
+/// start, so the replacement cannot be a copy of it. What to start is therefore
+/// read from `tray.yml` — by the helper itself, not handed in on the command line,
+/// which keeps it from being a way to have an arbitrary image started with
+/// administrator rights.
+///
+/// Two processes are involved in the answer: the kernel that is ended and the one
+/// that is started, and only the helper has the rights for either. Success is the
+/// new kernel's PID, as in the start helper; nothing is started unless the old
+/// kernel is really gone.
+pub fn replace_kernel_elevated(args: &[String]) -> i32 {
+    let Some(pid) = parse_pid(args) else {
+        return HELPER_BAD_ARGS;
+    };
+    let Some(exe) = kernel_image(pid) else {
+        return HELPER_BAD_ARGS;
+    };
+    // Read while the settings file is still there to be read: a layout the helper
+    // cannot see (`%APPDATA%` of another account) is a failure here rather than a
+    // kernel started from a half-known configuration.
+    let (settings, error) = settings::load(&settings::settings_path());
+    if error.is_some() {
+        return HELPER_NO_SETTINGS;
+    }
+    let (Ok(Some(path)), Ok(start_args)) = (
+        discover::find_kernel(&settings),
+        discover::launch_args(&settings),
+    ) else {
+        return HELPER_NO_SETTINGS;
+    };
+    match stop_kernel(Some(pid), &exe) {
+        Ok(outcome) if outcome.denied > 0 => return HELPER_NOT_STOPPED,
+        Ok(_) => {}
+        Err(_) => return HELPER_NOT_STOPPED,
+    }
+    // A `mihomo.exe` that survived means the ports are still taken: starting the
+    // replacement would produce two half-working kernels.
+    if list_mihomo().iter().any(|process| process.pid == pid) {
+        return HELPER_NOT_STOPPED;
+    }
+    match start(&path, &start_args) {
+        Ok(child) => i32::try_from(child.id()).unwrap_or(HELPER_NOT_STARTED),
+        Err(_) => HELPER_NOT_STARTED,
     }
 }
 
