@@ -8,7 +8,7 @@ Phase 1（MVP）已实现并真机验证：
 
 - 9 项菜单功能（状态行 / 系统代理 / 代理模式 / TUN / 代理分组 / 开机自启动 / 重载配置 / 打开 Web 面板 / 退出两项）全部可用
 - 内核/配置/控制器都按 mihomo 自己的规则解析（`mihomo.path`/`home`/`config` + 运行内核的 argv → 环境变量 → 配置文件 → `controller.*` 兜底），没有搜索、没有端口探测；「配置文件里没有 `external-controller`、地址由命令行或环境变量注入」的机器同样能定位
-- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（67 个单测）
+- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（68 个单测）
 - 实测：exe 373 KiB（381,952 B）；空闲私有内存 2.6–3.4 MB，工作集 ~15 MB
 - 验证方式：真机运行截图（`assets/app-menu-light.png`）+ 分组数据逐项比对 live API + 长列表滚动箭头（`assets/native-menu-scroll-arrows.png`）
 
