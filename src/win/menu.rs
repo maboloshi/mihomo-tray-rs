@@ -27,6 +27,8 @@ pub enum Action {
     Unfix(String),
     ToggleAutostart,
     Reload,
+    /// Drop every connection the kernel is proxying.
+    CloseConnections,
     /// Restart the kernel process, keeping its own command line.
     RestartKernel,
     /// End the running kernel and start the one `tray.yml` describes.
@@ -140,6 +142,13 @@ impl Menu {
             more_menu,
             &messages.menu_reload,
             Action::Reload,
+            false,
+            ready,
+        );
+        builder.item(
+            more_menu,
+            &messages.menu_close_connections,
+            Action::CloseConnections,
             false,
             ready,
         );
@@ -726,6 +735,7 @@ mod tests {
             labels(more),
             vec![
                 messages.menu_reload.to_string(),
+                messages.menu_close_connections.to_string(),
                 messages.menu_restart_kernel.to_string(),
                 messages.menu_force_restart_kernel.to_string(),
             ]
@@ -735,8 +745,8 @@ mod tests {
             "reload config is a submenu entry now, not a root one"
         );
 
-        // Reloading and restarting need a controller, replacing the kernel needs a
-        // kernel that is running: with neither, the submenu is out of reach.
+        // Reloading and closing connections need a controller, replacing the kernel
+        // needs a kernel that is running: with neither, the submenu is out of reach.
         let mut offline = snapshot(Vec::new());
         offline.controller_ok = false;
         let offline = Menu::build(&offline, &Settings::default());
@@ -759,7 +769,9 @@ mod tests {
             let id = (ID_BASE + index) as u32;
             let grayed = unsafe { GetMenuState(more, id, MF_BYCOMMAND) } & MF_GRAYED != 0;
             match action {
-                Action::Reload | Action::RestartKernel => assert!(grayed, "{action:?}"),
+                Action::Reload | Action::CloseConnections | Action::RestartKernel => {
+                    assert!(grayed, "{action:?}")
+                }
                 Action::ForceRestartKernel => assert!(!grayed, "{action:?}"),
                 _ => {}
             }

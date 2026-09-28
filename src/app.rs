@@ -29,6 +29,8 @@ pub enum Command {
     },
     Unfix(String),
     Reload,
+    /// Drop every connection the kernel is proxying.
+    CloseConnections,
     /// Ask the kernel to restart itself through its own API.
     RestartKernel,
     /// End the running kernel and start the one `tray.yml` describes.
@@ -161,6 +163,7 @@ impl App {
             }),
             Action::Unfix(group) => self.send(Command::Unfix(group.clone())),
             Action::Reload => self.send(Command::Reload),
+            Action::CloseConnections => self.send(Command::CloseConnections),
             Action::RestartKernel => self.send(Command::RestartKernel),
             // The kernel is replaced by this process, so nothing about it needs the
             // controller: the command runs even when none could be resolved.
@@ -490,6 +493,7 @@ fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
         Command::Select { group, member } => client.select(group, member),
         Command::Unfix(group) => client.unfix(group),
         Command::Reload => client.reload(),
+        Command::CloseConnections => client.close_connections(),
         Command::StopKernelElevated => return stop_kernel_elevated(worker),
         Command::Refresh => Ok(()),
         // Handled before this point, so that the client can be replaced while it

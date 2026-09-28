@@ -31,6 +31,7 @@ menu:
   empty: (empty)
   autostart: Start with Windows
   reload: Reload config
+  close_connections: Close all connections
   restart_kernel: Restart kernel
   force_restart_kernel: Force restart kernel
   web_ui: Open web dashboard

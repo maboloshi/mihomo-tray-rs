@@ -85,6 +85,7 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
 打开 Web 面板
 更多 ▶
    重载配置
+   关闭所有连接
    重启内核
    强制重启内核
 ─────────────────────────────
@@ -158,7 +159,7 @@ SetMenuInfo(hmenu, &mi);
 | 切换节点 | `PUT /proxies/{urlencode(group)}` `{"name":"member"}` | 组名/成员名必须 percent-encode（中文必需）；仅 `Selector`/`URLTest`/`Fallback` 可写，其余返回 400 |
 | 取消固定 | `DELETE /proxies/{urlencode(group)}` | 只对非 `Selector` 的可写组有效（内核 `ForceSet("")`） |
 | （Phase 2）测速 | `GET /group/{name}/delay?timeout=3000&url=…` | 实测返回 `{"成员":延迟}`，并让 `/proxies` 出现 `history` |
-| （Phase 2）关闭连接 | `DELETE /connections` | |
+| 关闭所有连接 | `DELETE /connections` | 内核遍历连接表逐个关闭后回 `204`（`hub/route/connections.go` 的 `closeAllConnections`）；连接不是设置，下一个请求会重建，所以是"立刻丢弃已开的连接"而非一个保持关闭的开关，也无需二次确认 |
 
 ### 5.1 Windows 侧的坑（本轮全部实测过）
 
@@ -249,7 +250,7 @@ ui:
 - 控制器不可达：状态行 `控制器不可达`，模式/TUN/分组项灰显；不自动重启内核（避免和外部管理方式打架），仅当 `mihomo.auto_start` 且进程确实不存在时才拉起。
 - TUN 开启后回读仍为 `false` → 内核没有管理员权限：启动自身的提权副本（`--kernel-start-elevated <pid>`）重启内核后重试；再失败则 tooltip 提示「TUN 未生效（通常需要管理员权限）」。取消 UAC 报「提权启动被取消或失败」，且此时旧内核还没被终止。
 - 提权副本只接受一个 PID，绝不接受路径或参数：映像与命令行都从那个进程读（`NtQueryInformationProcess(ProcessCommandLineInformation)`，见 §5），并且要求映像名是 `mihomo.exe`。否则副本就等于一个"UAC 弹窗写着本程序、实际以管理员身份运行任意程序"的提权原语；顺带这样也永远不用重建内核的启动参数（`-d`/`-f`/`-ext-ctl` 原样继承）。读不到命令行时报「无法读取内核自己的启动参数，未重启内核」并放弃本次重启。**唯一例外**是替换助手 `--kernel-replace-elevated <pid>`：它的目的就是让内核换成"本程序会启动的那一个"，所以启动参数不可能来自被替换的进程；它改为**自己读 `tray.yml`**（`settings::settings_path()`），依然只收一个 PID。
-- 「更多」下的三件事不同（见 [RESTART_KERNEL.md](RESTART_KERNEL.md) §1）：`重载配置` 原地重读配置文件；`重启内核` 让内核自己换一个进程（argv/环境/令牌原样继承，提权保持，不需要 UAC，但"设置不可知"照旧）；`强制重启内核` 结束当前内核、按 `tray.yml` 拉起本程序自己的内核（设置从此可知）。前两者需要控制器（无则灰显），强制重启只需要"有内核在跑"。
+- 「更多」下的几件事不同（见 [RESTART_KERNEL.md](RESTART_KERNEL.md) §1）：`重载配置` 原地重读配置文件；`关闭所有连接` 让内核丢弃当前连接表（`DELETE /connections`，一次请求，连接随后由下一个请求重建）；`重启内核` 让内核自己换一个进程（argv/环境/令牌原样继承，提权保持，不需要 UAC，但"设置不可知"照旧）；`强制重启内核` 结束当前内核、按 `tray.yml` 拉起本程序自己的内核（设置从此可知）。前两者与重启内核需要控制器（无则灰显），强制重启只需要"有内核在跑"。
 - 强制重启的内核未必是本程序启动的，所以先认身份再动手：记录的 PID 或映像匹配 `mihomo.path` 才静默做；映像可读但不同（别人的内核）弹一次 Yes/No，写明映像与 PID（默认按钮是"否"）；映像读不出来（多半是提权内核）先问同样的问题，再由提权副本完成"停 + 起"——只停不启会让新内核丢掉那份额外权限。`taskkill /IM` 从不使用，只结束选中的那个进程及其启动器家族；启动前用进程列表确认旧内核真的没了，避免两个内核抢同一批端口。
 - 副本用**退出码**回答：启动成功 = 新内核的 PID（正数），失败 = 负数（`-2` 参数/不是内核、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行、`-7` `tray.yml` 里没有可启动的内核）；停止助手成功 = 0。之所以不用文件/管道：那需要把路径交给提权进程，低权限调用者就能借一次 UAC 让管理员写任意文件。
 - 托盘把回传的 PID 记进 `Snapshot.kernel_pid`，后续「退出并停止 Mihomo」直接用它（提权进程的映像路径读不出来，PID 是托盘唯一能持有的身份）；PID 不在进程列表里即作废。没有记录时才比路径。
@@ -283,8 +284,8 @@ ui:
 |---|---|---|
 | Phase 0 | 技术验证：raw 托盘 + WinHTTP 调控制器 + 原生菜单 + 清单/深色；已产出体积/内存数据与菜单截图 | **已完成** |
 | Phase 1 | MVP：§1.1 全部菜单项 + `tray.yml` + 三条发现链 + 单实例 + TaskbarCreated；真机复测体积/内存并截图 | **已完成** |
-| Phase 2（可选） | 只读组 `now` 展示增强、`/group/{name}/delay` 测速项、`DELETE /connections`、退出时禁用系统代理、schtasks 免 UAC 自启 | 视需要 |
-| Phase 2 已做 | 「更多」子菜单 + `重启内核`（`POST /restart`）+ `强制重启内核`（按 `tray.yml` 归一别人的内核，含提权副本 `--kernel-replace-elevated`） | **已完成**，见 [RESTART_KERNEL.md](RESTART_KERNEL.md) |
+| Phase 2（可选） | 只读组 `now` 展示增强、`/group/{name}/delay` 测速项、退出时禁用系统代理、schtasks 免 UAC 自启 | 视需要 |
+| Phase 2 已做 | 「更多」子菜单 + `重启内核`（`POST /restart`）+ `强制重启内核`（按 `tray.yml` 归一别人的内核，含提权副本 `--kernel-replace-elevated`）+ `关闭所有连接`（`DELETE /connections`） | **已完成**，重启内核见 [RESTART_KERNEL.md](RESTART_KERNEL.md) |
 
 ---
 

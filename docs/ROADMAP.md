@@ -68,7 +68,7 @@ Phase 1（MVP）已实现并真机验证：
 |---|---|---|---|
 | 一键测速（`GET /group/{name}/delay`） | 中 | 小 | 测速后 `/proxies` 才出现 `history`，可顺带把延迟写进菜单文本 |
 | 退出时禁用系统代理（`proxy.system_proxy_on_exit`） | 中 | 小 | 配置项已预留语义 |
-| 关闭所有连接（`DELETE /connections`） | 低 | 小 | 一行 API |
+| ~~关闭所有连接（`DELETE /connections`）~~ | — | — | **已实现**（2026-09）：「更多 ▶ 关闭所有连接」，内核回 `204` 后连接由下个请求重建；需控制器，无则灰显 |
 | ~~重启内核（`POST /restart`）~~ | — | — | **已实现**（2026-09，`feat/restart-kernel`）：「更多 ▶ 重启内核」。提权与环境原样保持，客户端改 owned `Option<Client>` 即可热替换——原估的"中等成本"其实是十处签名 |
 | ~~强制重启（按 `tray.yml` 归一别人的内核）~~ | — | — | **已实现**（2026-09，同上）：「更多 ▶ 强制重启内核」，提权内核走新副本模式 `--kernel-replace-elevated <pid>`（自己读 `tray.yml`）。见 [RESTART_KERNEL.md](RESTART_KERNEL.md) |
 | 订阅 provider 刷新（`PUT /providers/proxies/{name}`） | 中 | 小 | 需先读 `/providers/proxies` 展示 `updatedAt` |

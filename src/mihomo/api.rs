@@ -332,6 +332,17 @@ impl Client {
     pub fn restart(&self) -> Result<(), String> {
         self.body_of("POST", "/restart", None).map(|_| ())
     }
+
+    /// Close every connection the kernel is proxying (`DELETE /connections`).
+    ///
+    /// mihomo walks its own connection table, closes each entry and answers `204`
+    /// (`hub/route/connections.go`). A connection is not a setting: the next
+    /// request through a proxy opens a new one, so this is "drop what is open
+    /// now", not a state that stays off — which is also why it needs no
+    /// confirmation.
+    pub fn close_connections(&self) -> Result<(), String> {
+        self.body_of("DELETE", "/connections", None).map(|_| ())
+    }
 }
 
 /// `/proxies` only exposes the adapter's type name, so mihomo's `SelectAble`
@@ -668,6 +679,19 @@ mod tests {
         let sent = server.request();
         assert_eq!(sent.method, "POST");
         assert_eq!(sent.path, "/restart");
+        assert_eq!(sent.body, "");
+    }
+
+    #[test]
+    fn close_connections_deletes_the_connections_route() {
+        // mihomo answers `204 No Content` after closing its whole connection table.
+        let server = spawn_server(204, "No Content", "");
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        client.close_connections().unwrap();
+
+        let sent = server.request();
+        assert_eq!(sent.method, "DELETE");
+        assert_eq!(sent.path, "/connections");
         assert_eq!(sent.body, "");
     }
 
