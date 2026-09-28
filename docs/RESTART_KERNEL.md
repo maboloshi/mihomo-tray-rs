@@ -1,6 +1,6 @@
-# 重启内核（设计与交接）
+# 重启内核（设计与实现记录）
 
-> 给下一次会话的起点文档。**实现前先把 §5 的待定项问清楚**（那是设计决策，不属于实现细节）。
+> 本功能已实现：`feat/restart-kernel` 分支上的四个主题提交（client 改 owned → 「更多」子菜单 → `重启内核` → `强制重启`（含提权副本模式））。§5 的待定项已按其中的「拍板记录」落地；§7 的真机部分仍需人工过一遍。
 
 ## 1. 三个动作，别混在一起
 
@@ -50,24 +50,39 @@
 6. **重新解析控制器并替换正在用的 client**（`discover::find_controller(settings)`）；刷新快照。
 7. 重新按路径认内核：`pick_kernel` 能找到新 PID（新进程的 parent 已退出，`family` 逻辑无副作用）。
 
-## 4. 改动清单（真正的成本在 client 热替换）
+实现时的三点与草稿不同，都是有意的：
 
-- `src/mihomo/api.rs`：`pub fn restart(&self) -> Result<(), String>`（`POST /restart`）。
-- `src/app.rs`：`Command::RestartKernel` + `execute` 分支 + `restart_kernel()`（§3 七步）；**把 client 从"借用"改成"可替换"**（例如把 `Option<Client>` 放进共享状态，或重启后重建 worker）——这是本功能的主要重构，别低估。
-- `src/i18n.rs` + `lang/en-US.yml`：菜单项、状态注记、失败文案（**三处同步**：`messages!` 列表、zh/en 表、语言文件，有单测盯着）。
-- `README.md`（特性/已知行为）、`docs/DESIGN.md`（§4、§8）、本文档。
-- 测试：`api.rs` 里用本地假控制器断言 `POST /restart` 的 method/path；重启流程能纯函数化的部分（清 PID → 等待 → 替换）单独测。
+- **先重新解析、再等待**（草稿是反的）：重启沿用 argv，地址本来就不会变；先解析才能顺带覆盖"内核这次从配置文件读到了另一个控制器"的情况，然后在**当前**的 client 上等应答。
+- **解析失败不丢 client**：地址仍然有效（argv 没变），把它换成"没有控制器"反而会把一次成功的重启说成失败；下一次刷新照旧会报告控制器不可达。
+- **一并清掉 `Worker` 里缓存的 `version`**（它原本只取一次，见 `refresh`）：重启可能正是在换二进制。
 
-## 5. 「强制重启」的设计与要拍板的点
+## 4. 改动清单（实际落点）
+
+- `src/mihomo/api.rs`：`Client::restart()`（`POST /restart`）。
+- `src/app.rs`：`Command::RestartKernel` / `Action::RestartKernel` + `restart_kernel()`（§3 七步）；`Worker.client` 由 `Option<&Client>` 改为 owned `Option<Client>`，并把 `version` 缓存搬进 `Worker` 一起替换。**"client 热替换"的实际成本远小于草稿估计**：`Client` 本来就是 `Clone`，`discover::find_controller` 本来就返回 owned 值，只是 worker 一直在借它。
+- `src/app.rs`：`Command::ForceRestartKernel` + `force_restart_kernel()` / `replace_kernel()`（本地"停 + 起"）/ `elevate_replacement()`（交提权副本）/ `adopt_new_kernel()`（重解析 + 等应答）/ `confirm_foreign_kernel()`。
+- `src/win/mod.rs`：`confirm()`（Yes/No，默认「否」；在 worker 线程上弹，与 UAC 一样不占用 UI 线程）。
+- `src/mihomo/proc.rs` + `src/main.rs` + `src/win/elevate.rs`：`--kernel-replace-elevated <pid>` 副本（自己读 `tray.yml`）、新退出码 `HELPER_NO_SETTINGS`（`-7`）、`kernel_replace_params()`。
+- `src/win/menu.rs`：「更多」子菜单（`重载配置` / `重启内核` / `强制重启内核`）；子菜单在"有控制器**或**有内核在跑"时可展开，项级灰显各按自己的条件。
+- `src/i18n.rs` + `lang/en-US.yml`：菜单项、状态注记、失败文案、确认框（**四处同步**：`messages!` 列表、zh/en 表、语言文件；带占位符的模板配一个 `impl Messages` 里的渲染方法，单测盯着键与占位符一一对应）。
+- `README.md`（特性/已知行为）、`docs/DESIGN.md`（§3、§5、§8）、本文档。
+- 测试（+3，共 71 个）：`api.rs` 用本地假控制器断言 `POST /restart` 的 method/path；`app.rs` 用一个**常驻**假控制器跑完整重启流程（清 PID/句柄、替换 client、清 version —— `api.rs` 那个单发假服务器演不了这个）；`menu.rs` 断言「更多」的内容与两档灰显。
+
+## 5. 「强制重启」的设计（已按下列决定实现）
 
 目标：把"别的启动器或上一次会话留下的内核"变成**按 `tray.yml` 跑的内核**（设置从此可知）。
 
-- **身份与许可**：只有映像匹配 `mihomo.path`（`proc::same_image`）才静默做；否则弹一次确认，写明映像路径与 PID。**绝不 `taskkill /IM`**（ROADMAP 硬约束 6）。
+- **身份与许可**：记录的 PID 匹配，或映像匹配 `mihomo.path`（`proc::same_image`）才静默做；否则弹一次 Yes/No（默认按钮「否」），写明映像路径与 PID。**绝不 `taskkill /IM`**（ROADMAP 硬约束 6）：只结束选中的那个进程及其启动器家族。
 - **提权保持**：提权内核必须由副本完成"停 + 起"，否则重启后掉权限、TUN 失效。
 - **副本怎么知道"要起什么"**（硬约束 9 禁止命令行传 exe/args）：
-  - **(a)** 调用方把值写进副本命令行 → 破掉"调用方不能规定以管理员启动什么"的性质；
-  - **(b) 副本自己读 `tray.yml`（推荐）**：映像仍由配置决定、调用方只给 PID；代价是副本要带 `settings`/`paths`/`discover`，且它在提权账户下 `%APPDATA%` 不是你的（便携布局那份才可靠）。需要一个新模式（如 `--kernel-replace-elevated <pid>`）。
-- **待定**：确认框措辞；是否要求"被替换的内核必须是我们认识的"；强制重启后是否清 `controller.*`（建议不清：它仍是"不动内核时"的兜底）；文档要写清二者关系——**重启/强制重启让内核变成我们认识的样子，`controller.*` 是不动内核、只改连接目标**。
+  - **(a) 否决**：调用方把值写进副本命令行 → 破掉"调用方不能规定以管理员启动什么"的性质，与硬约束 9 冲突；
+  - **(b) 已实现**：副本自己读 `tray.yml`（`settings::settings_path()` → `discover::launch_args`），调用方只给 PID，新模式 `--kernel-replace-elevated <pid>`。代价：它在提权账户下 `%APPDATA%` 不是你的，只有 exe 旁的便携那份一定可见；读不到时回 `-7`（`HELPER_NO_SETTINGS`）并**保持旧内核不动**。
+- **拍板记录**（本次会话，用户决定）：
+  - 「更多」= `重载配置` / `重启内核` / `强制重启内核`；`打开 Web 面板`、`开机自启动`、`退出` 留在根菜单；`强制重启内核` 无内核在跑时灰显。
+  - 确认框只在运行内核的映像 ≠ `mihomo.path` 或读不出映像时出现（含提权内核）。
+  - **不清** `controller.*`：它仍是"不动内核、只改连接目标"的兜底。
+  - `README.md` 的菜单截图（`docs/assets/app-menu-light.png`）本次不动，由用户事后重截。
+- 三者关系（文档与 README 都要写清）：**重启/强制重启让内核变成我们认识的样子；`controller.*` 是不动内核、只改连接目标**。
 
 ## 6. 已知坑
 
@@ -77,17 +92,19 @@
 - `embedMode` 下没有 `/restart` 路由（CLI 内核不受影响）。
 - 与别的启动器（clash-verge 等）打架：强制重启后对方可能再把它的内核拉起来。
 - 无控制器时无法重启（菜单项灰显），此时唯一手段是强制重启。
+- 「强制重启」期间要结束一个**不是本程序启动的**进程，所以它只认"选中的那一个 + 它的启动器家族"：别的 `mihomo.exe` 只要映像不同就不碰（`pick_kernel` 从不选可读但路径不同的实例）。
+- 提权副本读 `tray.yml` 的可见性取决于它运行在哪个账户下（见 §5 的(b)）；跨账户授权时只有便携布局可靠，读不到就回 `-7`、旧内核保持不动。
 
 ## 7. 验收
 
-- 自动化：`cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release`（当前 68 个，期望 +N）。
-- 真机：① 普通内核重启（PID 变、设置不变、亚秒级恢复）；② 提权内核重启后**仍提权**（TUN 仍生效）；③ 无控制器时灰显/报错；④ 强制重启：让 `tray.yml` 指向另一份配置，确认重启后设置随 `tray.yml` 生效。
+- 自动化：`cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release`（71 个，原 68 +3）。
+- 真机（**待人工过一遍**）：① 普通内核重启（PID 变、设置不变、亚秒级恢复）；② 提权内核重启后**仍提权**（TUN 仍生效）；③ 无控制器时「重启内核」灰显、而「强制重启内核」仍可用；④ 强制重启：让 `tray.yml` 指向另一份配置，确认重启后设置随 `tray.yml` 生效；⑤ 让别的启动器拉起内核（映像不同）→ 弹确认框、选「否」时什么都不发生；⑥ 提权内核的强制重启走一次 UAC，UAC 后 TUN 仍生效。
+- 需要人工重截：`docs/assets/app-menu-light.png`（菜单结构变了两处：根菜单少了「重载配置」、多了「更多」）。
 
-## 8. 起点信息
+## 8. 本次落地信息（给下一次会话）
 
-- 起点：`main` @ `9e98c14`（先 `git log -1` 看当前 tip；本文档之后可能已有新提交）。
-- 工作方式：新 worktree `.worktrees/restart-kernel` + 分支 `feat/restart-kernel`；显式 `git add`（禁 `add -A`）；一主题一 commit；提交前跑三件套。
-- 必读：`src/app.rs`（worker / `Command` / `refresh` / `stop_kernel`）、`src/mihomo/api.rs`、`src/mihomo/discover.rs`、`src/mihomo/proc.rs`、`docs/DESIGN.md` §4/§8、`docs/ROADMAP.md`（硬约束）。
-- 可直接粘贴的开场说明：
-
-  > 项目 `D:\App\github项目\mihomo-tray_rust`，先读 `docs/RESTART_KERNEL.md`（重启内核的设计与交接），按它的 §5 先把待定项问清楚，再动代码。工作方式按仓库约定：新 worktree + `feat/restart-kernel`，一主题一 commit，收尾三件套全绿。
+- 起点：`main` @ `68dbf20`（文档里原来的 `9e98c14` 已过期）。
+- 分支：`feat/restart-kernel`，worktree `.worktrees/restart-kernel`；四个主题提交：client 改 owned → 「更多」子菜单 → `重启内核` → `强制重启`（本地路径）→ 提权替换副本（外加一个文档提交）。
+- 提交前必过：三件套 + 本仓库 `rust-deterministic-gate` 的本地闭环（fmt/clippy 输出不回传）。
+- 收尾：rebase 到主线最新 tip 后 `merge --ff-only`（本仓库主线要求线性历史，后落地者负责 rebase）。
+- 必读：`src/app.rs`（worker / `Command` / `refresh` / `stop_kernel` / `restart_kernel` / `force_restart_kernel`）、`src/mihomo/api.rs`、`src/mihomo/discover.rs`、`src/mihomo/proc.rs`、`docs/DESIGN.md` §3/§5/§8、`docs/ROADMAP.md`（硬约束 9 是提权路径的红线）。

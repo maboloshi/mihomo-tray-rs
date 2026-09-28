@@ -56,8 +56,8 @@ Phase 1（MVP）已实现并真机验证：
 | 一键测速（`GET /group/{name}/delay`） | 中 | 小 | 测速后 `/proxies` 才出现 `history`，可顺带把延迟写进菜单文本 |
 | 退出时禁用系统代理（`proxy.system_proxy_on_exit`） | 中 | 小 | 配置项已预留语义 |
 | 关闭所有连接（`DELETE /connections`） | 低 | 小 | 一行 API |
-| 重启内核（`POST /restart`） | 中 | 中 | 保持提权与环境、无需 helper；真正的成本是把 `Worker.client` 改成可热替换。详见 [RESTART_KERNEL.md](RESTART_KERNEL.md) |
-| 强制重启（按 `tray.yml` 归一别人的内核） | 中 | 大 | 需用户确认 + 提权副本新入口，见 [RESTART_KERNEL.md](RESTART_KERNEL.md) §5 |
+| ~~重启内核（`POST /restart`）~~ | — | — | **已实现**（2026-09，`feat/restart-kernel`）：「更多 ▶ 重启内核」。提权与环境原样保持，客户端改 owned `Option<Client>` 即可热替换——原估的"中等成本"其实是十处签名 |
+| ~~强制重启（按 `tray.yml` 归一别人的内核）~~ | — | — | **已实现**（2026-09，同上）：「更多 ▶ 强制重启内核」，提权内核走新副本模式 `--kernel-replace-elevated <pid>`（自己读 `tray.yml`）。见 [RESTART_KERNEL.md](RESTART_KERNEL.md) |
 | 订阅 provider 刷新（`PUT /providers/proxies/{name}`） | 中 | 小 | 需先读 `/providers/proxies` 展示 `updatedAt` |
 | ~~schtasks 免 UAC 自启（含 TUN 开机即用）~~ | — | — | 已否决：计划任务服务可能被禁用。改为点 TUN 时按需提权（一次性辅助进程重启内核） |
 | 节点延迟/健康色点（owner-draw 菜单项） | 中 | 大 | 观感提升明显，但要 `WM_MEASUREITEM`/`WM_DRAWITEM` 全套 |

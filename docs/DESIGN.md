@@ -85,6 +85,8 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
 打开 Web 面板
 更多 ▶
    重载配置
+   重启内核
+   强制重启内核
 ─────────────────────────────
 退出 ▶
    退出并停止 Mihomo
@@ -151,6 +153,7 @@ SetMenuInfo(hmenu, &mi);
 | 切模式 | `PATCH /configs` `{"mode":"rule"}` | 会重建全部 inbound；`tun` 未变时提前返回，不断流 |
 | 开关 TUN | `PATCH /configs` `{"tun":{"enable":true}}` | TUN 建立失败只写日志并把 enable 置 false，**HTTP 仍返回 204** → 必须回读确认；回读仍为 false 说明内核没提权：用 `--kernel-start-elevated <pid>` 提权副本重启内核后重试（建 Wintun 需要管理员） |
 | 重载配置 | `PUT /configs?force=true`，body `{"path":""}` | **空 body 会 400**；不带 `force` 不重建 inbound；`path` 为空时 mihomo 回落到自己启动时的配置文件 |
+| 重启内核 | `POST /restart` | 先回 `200 {"status":"ok"}` 再关进程，所以"响应成功"**不等于**内核已经起来，必须再探活；Windows 上内核用 `exec.Command`+`os.Exit` 以**自己的 argv 与环境**重建进程，因此提权保持、地址不变，但也意味着"别人的内核"重启后仍然是别人的（设置仍不可知） |
 | 分组与节点 | `GET /proxies` | 顺序=字典序；`all` 非空的即分组；`history` 可能不存在（未测速） |
 | 切换节点 | `PUT /proxies/{urlencode(group)}` `{"name":"member"}` | 组名/成员名必须 percent-encode（中文必需）；仅 `Selector`/`URLTest`/`Fallback` 可写，其余返回 400 |
 | 取消固定 | `DELETE /proxies/{urlencode(group)}` | 只对非 `Selector` 的可写组有效（内核 `ForceSet("")`） |
@@ -245,8 +248,10 @@ ui:
 - 图标四态（优先序）：TUN=蓝 > 系统代理开=橙 > 内核可用=绿 > 控制器不可达=灰。注册表说系统代理开着但内核不应答时仍是灰——那才是这一刻真正要看见的状态；「内核可用」和两种接管方式是三件事，所以三个颜色。
 - 控制器不可达：状态行 `控制器不可达`，模式/TUN/分组项灰显；不自动重启内核（避免和外部管理方式打架），仅当 `mihomo.auto_start` 且进程确实不存在时才拉起。
 - TUN 开启后回读仍为 `false` → 内核没有管理员权限：启动自身的提权副本（`--kernel-start-elevated <pid>`）重启内核后重试；再失败则 tooltip 提示「TUN 未生效（通常需要管理员权限）」。取消 UAC 报「提权启动被取消或失败」，且此时旧内核还没被终止。
-- 提权副本只接受一个 PID，绝不接受路径或参数：映像与命令行都从那个进程读（`NtQueryInformationProcess(ProcessCommandLineInformation)`，见 §5），并且要求映像名是 `mihomo.exe`。否则副本就等于一个"UAC 弹窗写着本程序、实际以管理员身份运行任意程序"的提权原语；顺带这样也永远不用重建内核的启动参数（`-d`/`-f`/`-ext-ctl` 原样继承）。读不到命令行时报「无法读取内核自己的启动参数，未重启内核」并放弃本次重启。
-- 副本用**退出码**回答：启动成功 = 新内核的 PID（正数），失败 = 负数（`-2` 参数/不是内核、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行）；停止助手成功 = 0。之所以不用文件/管道：那需要把路径交给提权进程，低权限调用者就能借一次 UAC 让管理员写任意文件。
+- 提权副本只接受一个 PID，绝不接受路径或参数：映像与命令行都从那个进程读（`NtQueryInformationProcess(ProcessCommandLineInformation)`，见 §5），并且要求映像名是 `mihomo.exe`。否则副本就等于一个"UAC 弹窗写着本程序、实际以管理员身份运行任意程序"的提权原语；顺带这样也永远不用重建内核的启动参数（`-d`/`-f`/`-ext-ctl` 原样继承）。读不到命令行时报「无法读取内核自己的启动参数，未重启内核」并放弃本次重启。**唯一例外**是替换助手 `--kernel-replace-elevated <pid>`：它的目的就是让内核换成"本程序会启动的那一个"，所以启动参数不可能来自被替换的进程；它改为**自己读 `tray.yml`**（`settings::settings_path()`），依然只收一个 PID。
+- 「更多」下的三件事不同（见 [RESTART_KERNEL.md](RESTART_KERNEL.md) §1）：`重载配置` 原地重读配置文件；`重启内核` 让内核自己换一个进程（argv/环境/令牌原样继承，提权保持，不需要 UAC，但"设置不可知"照旧）；`强制重启内核` 结束当前内核、按 `tray.yml` 拉起本程序自己的内核（设置从此可知）。前两者需要控制器（无则灰显），强制重启只需要"有内核在跑"。
+- 强制重启的内核未必是本程序启动的，所以先认身份再动手：记录的 PID 或映像匹配 `mihomo.path` 才静默做；映像可读但不同（别人的内核）弹一次 Yes/No，写明映像与 PID（默认按钮是"否"）；映像读不出来（多半是提权内核）先问同样的问题，再由提权副本完成"停 + 起"——只停不启会让新内核丢掉那份额外权限。`taskkill /IM` 从不使用，只结束选中的那个进程及其启动器家族；启动前用进程列表确认旧内核真的没了，避免两个内核抢同一批端口。
+- 副本用**退出码**回答：启动成功 = 新内核的 PID（正数），失败 = 负数（`-2` 参数/不是内核、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行、`-7` `tray.yml` 里没有可启动的内核）；停止助手成功 = 0。之所以不用文件/管道：那需要把路径交给提权进程，低权限调用者就能借一次 UAC 让管理员写任意文件。
 - 托盘把回传的 PID 记进 `Snapshot.kernel_pid`，后续「退出并停止 Mihomo」直接用它（提权进程的映像路径读不出来，PID 是托盘唯一能持有的身份）；PID 不在进程列表里即作废。没有记录时才比路径。
 - 路径比较必须归一化（[proc.rs](../src/mihomo/proc.rs) `same_image`：`canonicalize` + 忽略大小写）。实测：scoop 的 `apps\mihomo-v3\current\mihomo.exe` 是 junction，进程报告的是 `apps\mihomo-v3\1.19.31\mihomo.exe`，字符串直接比较**永远不相等**——旧代码因此每次都靠"子句柄兜底"才能停掉非提权内核，而提权后子句柄已作废，于是托盘"成功退出"、提权内核留下。
 - 停内核按**家族**停（[proc.rs](../src/mihomo/proc.rs) `family`）：scoop shim 也叫 `mihomo.exe`、真内核是它的子进程，只按映像路径杀会留下真内核；家族只从"已匹配到的那一个进程"向上找 `mihomo.exe` 父、向下找子，不会牵连无关进程。
@@ -257,6 +262,7 @@ ui:
   - UAC 若用**另一个管理员账户**的凭据授权，副本以那个账户身份运行，读不到也停不掉本账户的内核（回 `-2`/`-5`）；这种机器上只能人工以管理员权限启动内核。
   - 副本复用**内核自己的命令行**，所以"只存在于环境变量里"的配置能不能过 UAC，取决于它有没有被写进命令行：`-d`/`-f` 总是显式传，`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET` 在启动内核时被具体化成 `-ext-ctl`/`-secret`，因此这两类都跟得过去；`CLASH_HOME_DIR`/`CLASH_CONFIG_FILE` 则完全不参与（被显式 `-d`/`-f` 钉住）。只有"内核由别的启动器拉起"时托盘才可能读不到它的设置，那时用 `controller.*` 兜底（`mihomo.args` 不接受 `-d`/`-f`/`-ext-ctl`/`-secret`）。
   - 记录的 PID 只在本会话内有效（跨托盘重启靠路径身份兜底）；PID 号被复用的窗口极小，但仍以"它还在 `mihomo.exe` 列表里"为唯一校验。
+  - 替换助手要**自己读 `tray.yml`**，所以它看到的布局取决于它以哪个账户运行：`%APPDATA%` 若不是本账户的，只有 exe 旁的便携 `tray.yml` 一定可见；这种情况下它回 `-7` 并保持旧内核不动，而不是按半份设置启动一个新内核。
   - 关闭 TUN **不回读**（开启必须回读）：静默失败只会表现为菜单勾选状态没变。
   - **控制器只按明文 http 访问**：`Client::new` 会去掉 `http://`/`https://` 前缀，WinHTTP 请求不带 `WINHTTP_FLAG_SECURE`。控制器在本机回环上时这不是问题（mihomo 的 `external-controller` 本身就是明文 http）；跨机需要加密时自行套隧道。
 
@@ -278,6 +284,7 @@ ui:
 | Phase 0 | 技术验证：raw 托盘 + WinHTTP 调控制器 + 原生菜单 + 清单/深色；已产出体积/内存数据与菜单截图 | **已完成** |
 | Phase 1 | MVP：§1.1 全部菜单项 + `tray.yml` + 三条发现链 + 单实例 + TaskbarCreated；真机复测体积/内存并截图 | **已完成** |
 | Phase 2（可选） | 只读组 `now` 展示增强、`/group/{name}/delay` 测速项、`DELETE /connections`、退出时禁用系统代理、schtasks 免 UAC 自启 | 视需要 |
+| Phase 2 已做 | 「更多」子菜单 + `重启内核`（`POST /restart`）+ `强制重启内核`（按 `tray.yml` 归一别人的内核，含提权副本 `--kernel-replace-elevated`） | **已完成**，见 [RESTART_KERNEL.md](RESTART_KERNEL.md) |
 
 ---
 
@@ -288,7 +295,7 @@ ui:
 3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`，无资源文件、无图像库。
 4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
 5. **实测体积/内存**：exe 373 KB（381,952 B；i18n 之前 338 KB，增量见 §11.7），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
-6. **单测 68 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退；设置层断言子集解析的边界（BOM、撇号、引号内逗号、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
+6. **单测 71 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退；设置层断言子集解析的边界（BOM、撇号、引号内逗号、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
 7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（62 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
    **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB，当时的数字），远高于动工前估的 3–4 KB——语言表本体、62 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（62 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
 
