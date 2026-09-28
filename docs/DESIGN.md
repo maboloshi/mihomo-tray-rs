@@ -119,17 +119,22 @@ SetMenuInfo(hmenu, &mi);
 
 ---
 
-## 4. 发现链
+## 4. 内核、配置与控制器来自哪里
 
-三层来源不同，必须分开解析。
+**没有搜索、也没有探测**：三者都按 mihomo 自己的规则解析，认不出来就报错（报错里指名要改的那一项），而不是猜一个。
 
 | 目标 | 顺序 |
 |---|---|
-| `mihomo.exe` | `tray.yml mihomo.path` → 运行中进程的真实映像路径（Toolhelp32 + `QueryFullProcessImageNameW`，跳过 scoop shim）→ exe 同级 / `bin` / `core` → `PATH` → `%USERPROFILE%\scoop\shims`、`$env:SCOOP\shims` |
-| 配置 / 工作目录 | `tray.yml mihomo.config` / `mihomo.args`（`-d`、`-f`）→ `CLASH_HOME_DIR` + `CLASH_CONFIG_FILE` 拼绝对路径 → `%USERPROFILE%\.config\mihomo\config.yaml` |
-| controller | `tray.yml controller.address` + `secret` → `CLASH_OVERRIDE_EXTERNAL_CONTROLLER` / `CLASH_OVERRIDE_SECRET` → 上述配置文件里的 `external-controller` / `secret` → **探测** `127.0.0.1:9090` 等常见端口并用 `GET /` 返回 `{"hello":"mihomo"}` 校验 |
+| `mihomo.exe` | `tray.yml mihomo.path`（必填、绝对路径；不存在或相对路径 → 启动期报错） |
+| 配置目录 | `mihomo.home` → `mihomo.config` 所在目录 → mihomo 自己的默认 `%USERPROFILE%\.config\mihomo`（`XDG_CONFIG_HOME` 仅在该目录不存在时参与，条件与 mihomo 一致） |
+| 配置文件 | `mihomo.config` → `<配置目录>\config.yaml`（mihomo 对空 `-f` 的规则） |
+| 命令行 | 运行中那个内核自己的 argv：`-f`/`-d` 说明它读哪份文件；`-ext-ctl`/`-secret` 非空时覆盖配置文件（mihomo 的优先级）。同用户可读（`NtQueryInformationProcess`），提权内核读不到就跳过这一来源 |
+| controller | 上述 argv → `CLASH_OVERRIDE_EXTERNAL_CONTROLLER` / `CLASH_OVERRIDE_SECRET`（正是同名 flag 的默认值）→ 配置文件里的 `external-controller` / `secret` → `tray.yml controller.address` / `secret` |
 
-> 本机实例：`~/.config/mihomo/config.yaml` 里没有 `external-controller`，源码也没有默认值，但 9090 在响应 —— 说明地址来自命令行/环境变量注入，因此**最后一层探测不能省**。
+- **逐字段**：mihomo 侧某字段没设置或读不到，才用 `tray.yml` 的同名字段；`controller.*` 是兜底而非覆盖（旧实现反过来，会把内核的设置架空）。
+- 选哪个内核的 argv：被明确告知读**同一份配置文件**的那个；只有一个 `mihomo.exe` 时就是它；其余情况（多个、都读别的文件）不猜，直接跳过这一来源。相对 `-f`/`-d` 无法解析（要读别的进程的 CWD）→ 同样视为"不可知"。
+- 本程序启动内核时**总是**显式传 `-d`/`-f`（绝对路径），并拒绝 `mihomo.args` 里的 `-d`/`-f`/`-ext-ctl`/`-secret`（同一设置两处写法 → 内核与托盘读到的文件会不同）；工作目录设为 `mihomo.exe` 所在目录，让 args 里的相对路径有确定基准。
+- 内核没开 `external-controller`、或只开了 `-tls`/`-unix`/`-pipe`，都明确报出来。唯一看不到的情况：内核由别的启动器拉起、用 `-ext-ctl`/`-secret` 覆盖了配置、其命令行又读不到 → 报不可达，由 `controller.*` 兜底。
 
 ---
 
@@ -184,16 +189,17 @@ src/win/autostart.rs        # HKCU Run
 src/win/elevate.rs          # 提权副本的参数（只有一个 PID）+ ShellExecuteExW("runas") + 等退出码
 src/win/shell.rs            # ShellExecuteW：把 URL 交给默认浏览器
 src/mihomo/api.rs           # WinHTTP 客户端 + 上述端点
-src/mihomo/discover.rs      # §4 的三条发现链 + `-d <配置目录>` / `-f <配置文件>`
-src/mihomo/proc.rs          # 启动/停止内核（只停路径匹配的 PID）+ 提权副本主体（按 PID 读映像/命令行）
-src/settings.rs             # tray.yml 读取（极简 YAML 子集）
+src/mihomo/discover.rs      # §4 的来源解析（内核/配置/控制器）+ `-d`/`-f` 组装 + 运行内核 argv
+src/mihomo/proc.rs          # 启动/停止内核（只停路径匹配的 PID）+ 按 PID 读映像/命令行 + 提权副本主体
+src/paths.rs                # tray.yml 路径：`%NAME%` 按 cmd 展开，且必须绝对
+src/settings.rs             # tray.yml 读取（极简 YAML 子集）+ 模板（include_str! 仓库里的两份示例）
 src/i18n.rs                 # 界面语言表（内置 zh-CN/en-US）+ lang/<系统标签>.yml 叠加
 src/state.rs                # 状态结构 + 内核路径/句柄槽
 src/icon.rs                 # RGBA → HICON（多尺寸、状态色）
 ```
 
 - **UI 线程**：创建窗口/托盘/菜单并跑 `GetMessageW` 循环。所有菜单操作必须在此线程（Win32 菜单线程亲和）。
-- **启动顺序**：先注册托盘图标（灰色）并立刻发一条「正在查找内核…」状态注记，发现控制器、拉起内核、等内核应答都在后台线程（等待上限 5 s）。探测的就是发现出来的控制器地址，而发现阶段本身也不许拖：默认端口**并行**探、每次 800 ms 短超时（`Client::alive` 自带），否则一个黑洞端口（接受连接却不答）或一台"被拒也要 2 s 才回"的机器就会把内核启动推后好几秒（实测本机：9091/9097/9098/6170 连不上也不拒绝、各耗满超时；被拒的回环连接也要 ~2 s；而成功探测预热后只要 1~3 ms、冷启首个连接约 400 ms，800 ms 是给冷启留的余量）。等待期间写 `Snapshot.status_note`，tooltip 与菜单显示「正在启动内核…」；预算内没应答就换成「内核尚未应答，仍在等待」并一直留着，直到控制器真的答话才清掉。内核慢启动因此只影响状态行，不再推迟图标出现。
+- **启动顺序**：先注册托盘图标（灰色）并立刻发一条「正在查找内核…」状态注记，解析控制器、拉起内核、等内核应答都在后台线程（等待上限 5 s）。解析过程本身不许拖：读一个进程快照、最多读几个内核的 argv、打开一份配置，都是本机毫秒级操作——原来那套"并行探测 5 个端口、每次 800 ms"的实现已随端口探测一起删除（实测本机那些黑洞端口会让内核启动推迟好几秒）。等待期间写 `Snapshot.status_note`，tooltip 与菜单显示「正在启动内核…」；预算内没应答就换成「内核尚未应答，仍在等待」并一直留着，直到控制器真的答话才清掉。内核慢启动因此只影响状态行，不再推迟图标出现。
 - **后台线程**：1 个轮询线程（默认 3 s，`stack_size(256 KB)`）拉 `/configs`，更新图标/tooltip，用 `PostMessageW(WM_APP+n)` 唤醒 UI；菜单项状态在下一次右键重建时同步更新。
 - **点击处理**：`TrackPopupMenuEx` 返回命令 id 后**同步**执行（写注册表/发 HTTP 都在本机回环，毫秒级）；HTTP 失败不弹窗，写进 tooltip 并在下一轮自然覆盖。
 
@@ -201,18 +207,19 @@ src/icon.rs                 # RGBA → HICON（多尺寸、状态色）
 
 ## 7. 设置文件 `tray.yml`
 
-位置：exe 同目录优先（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`。
-解析：`key: value`、一层嵌套、`#` 注释、`"` 或 `'` 引号；不支持列表内联以外的 YAML 特性（无锚点、无多行块）、不支持列表跨行。文件可带 UTF-8 BOM；引号只在同一行内有配对时才开启，所以 `don't` 这样的撇号不会把行尾注释吞进值里。`https://` 前缀会被去掉，控制器一律按明文 http 连（见 §8 已知限制）。
+位置：exe 同目录优先（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`；同目录那份**必须有内容**才算数（scoop 清单会建 0 字节文件，空/不可读一律回退 `%APPDATA%`）。首次运行按当前界面语言写出模板：仓库里的 `tray_Sample_zh.yml` / `tray_Sample_en.yml`（`include_str!` 进二进制，仓库与生成物永不漂移）。
+解析：`key: value`、一层嵌套、`#` 注释、`"` 或 `'` 引号；不支持列表内联以外的 YAML 特性（无锚点、无多行块）、不支持列表跨行。文件可带 UTF-8 BOM；引号只在同一行内有配对时才开启，所以 `don't` 这样的撇号不会把行尾注释吞进值里。**路径三项（`path`/`home`/`config`）先做 `%NAME%` 展开（`ExpandEnvironmentStringsW`，与 cmd 一致）再要求绝对**：相对路径、`~`、`$VAR` 一律拒绝并报出原值与展开值（`src/paths.rs`）；`mihomo.args` 里的 `-d`/`-f`/`-ext-ctl`/`-secret` 直接被拒（同一设置两处写法）。`https://` 前缀会被去掉，控制器一律按明文 http 连（见 §8 已知限制）。
 
 ```yaml
 mihomo:
-  path: ""                # 留空 = 自动发现
-  args: []                # 额外启动参数，如 -d/-f
-  config: ""              # 可选：显式配置文件路径（同时用于读取 external-controller）
+  path: ""                # 必填：mihomo.exe（绝对路径）
+  home: ""                # 内核 -d；留空 = 内核默认 %USERPROFILE%\.config\mihomo
+  config: ""              # 内核 -f；留空且 home 非空 = <home>\config.yaml
+  args: []                # 额外启动参数（原样透传，%NAME% 也会展开）
   auto_start: true        # 启动时若内核未运行则拉起
 controller:
-  address: ""             # 如 "127.0.0.1:9090"；留空 = 自动发现
-  secret: ""
+  address: ""             # 兜底：内核没设置 external-controller、或它的配置读不到时才用
+  secret: ""              # 兜底：同上
   timeout_ms: 2000
 proxy:
   bypass: []              # 追加到 ProxyOverride（仅在它不存在时写入，已有列表不覆盖）
@@ -246,7 +253,7 @@ ui:
 - 系统代理：默认「退出时保持现状」（不保存原值、退出时不改写）；`ProxyOverride` **只在注册表里没有该值时才写入**（`bypass` + `<local>`），用户自己整理过的列表不会被覆盖。
 - **已知限制**（都由"只有内核需要提权"这一件事决定，不是缺陷）：
   - UAC 若用**另一个管理员账户**的凭据授权，副本以那个账户身份运行，读不到也停不掉本账户的内核（回 `-2`/`-5`）；这种机器上只能人工以管理员权限启动内核。
-  - 副本复用**内核自己的命令行**，所以"只存在于环境变量里"的配置（`CLASH_HOME_DIR`、`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET`）不会跟着提权过 UAC；要可靠就用 `tray.yml` 的 `mihomo.args`。
+  - 副本复用**内核自己的命令行**，所以"只存在于环境变量里"的配置（`CLASH_HOME_DIR`、`CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET`）不会跟着提权过 UAC；要可靠就在 `tray.yml` 里写明 `mihomo.home`/`mihomo.config`，控制器用 `controller.*` 兜底（`mihomo.args` 不再接受 `-d`/`-f`/`-ext-ctl`/`-secret`）。
   - 记录的 PID 只在本会话内有效（跨托盘重启靠路径身份兜底）；PID 号被复用的窗口极小，但仍以"它还在 `mihomo.exe` 列表里"为唯一校验。
   - 关闭 TUN **不回读**（开启必须回读）：静默失败只会表现为菜单勾选状态没变。
   - **控制器只按明文 http 访问**：`Client::new` 会去掉 `http://`/`https://` 前缀，WinHTTP 请求不带 `WINHTTP_FLAG_SECURE`。控制器在本机回环上时这不是问题（mihomo 的 `external-controller` 本身就是明文 http）；跨机需要加密时自行套隧道。
@@ -310,6 +317,8 @@ ui:
 | `["a,b"]` 被切成两个条目 | 只按引号外的逗号切分 |
 | `-f` 只在 `tray.yml` 显式指定时补，`CLASH_CONFIG_FILE` 指向的非默认文件名不会告诉内核，内核于是去读 `-d` 下的 `config.yaml`（不是托盘刚读过的那份） | 文件名不是 `config.yaml` 就补 `-f`（显式配置一律补） |
 | `controller_from_config` 不区分缩进，嵌套的 `secret:` 会覆盖控制器的 | 只认顶层键 |
+| scoop 清单在 exe 同目录建了个 0 字节 `tray.yml` 并 persist 它，便携布局于是永久压过用户真正编辑的 `%APPDATA%\mihomo-tray\tray.yml`：填什么都不生效 | portable 文件必须有内容才算数（空/不可读一律回退 `%APPDATA%`）；打包改为装 `tray_Sample_*.yml` |
+| `controller.address` 一旦非空就直接返回、配置文件里的 `external-controller`/`secret` 被架空，内核改了 secret 托盘还拿旧值去连 | 控制器改为按 mihomo 自己的优先级解析（argv → 环境变量 → 配置文件 → `controller.*` 兜底），`controller.*` 只在 mihomo 没设置/读不到时生效 |
 | 内核在"列出进程"和"终止"之间退出时，`TerminateProcess` 对已退出进程同样返回 access-denied，被记成"拒绝" → 中止其余终止、提权重启失败 | 用进程对象是否已 signaling 区分"已退出"与"无权"；`OpenProcess` 报 87 也按已退出处理 |
 | 命令行无参数时 `argv[1..]` 越界 panic（提权副本路径） | 改用 `get(1..)` |
 | `is_shim` 用子串匹配，`shims-backup` 被误判为 scoop shim | 按父目录名是否为 `shims` 判断 |

@@ -21,7 +21,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 ## 环境要求
 
 - Windows 10/11 (x64)
-- [mihomo](https://github.com/MetaCubeX/mihomo) 已安装（本程序也能自行发现并拉起）
+- [mihomo](https://github.com/MetaCubeX/mihomo) 已安装；本程序**不搜索它**，要在 `tray.yml` 里写明 `mihomo.path`
 - 构建需要 Rust stable（`edition 2024`，MSRV 1.85），无需额外工具链
 
 ## 构建
@@ -44,17 +44,23 @@ cargo test                 # 设置解析 / URL 编码 / 地址解析的单测
 
 ## 设置文件
 
-`tray.yml`：**exe 同目录优先**（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`；首次运行会自动写出带注释的默认文件。解析器只支持一个文档化的 YAML 子集：顶层键、一层嵌套、`#` 注释、引号标量与内联 `[a, b]` 列表。
+`tray.yml`：**exe 同目录优先**（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`。
+
+- 同目录那份**必须有内容**才算数：scoop 清单会建一个 0 字节的 `tray.yml`，空文件（以及读不到的文件）不再遮蔽你真正编辑的那份，一律回退 `%APPDATA%`。打包时请把 `tray_Sample_zh.yml` / `tray_Sample_en.yml` 之一装成 `tray.yml`，不要建空文件。
+- 首次运行会按**当前界面语言**写出模板：仓库里的 [`tray_Sample_zh.yml`](tray_Sample_zh.yml) 与 [`tray_Sample_en.yml`](tray_Sample_en.yml) 就是那份文本（二进制里 `include_str!` 同一个文件，不会和仓库漂移），想直接改也可以从仓库复制。
+- 解析器只支持一个文档化的 YAML 子集：顶层键、一层嵌套、`#` 注释、引号标量与内联 `[a, b]` 列表。
+- **路径必须绝对**：盘符路径（`C:\...`）或 UNC 路径（`\\server\share\...`）；`%NAME%` 按 cmd 的规则展开（大小写不敏感，未定义变量原样保留、随即报错）。相对路径和 `~` 会被拒绝并指出是哪一项——mihomo 会拿相对路径去拼自己的工作目录，而由本程序启动的内核，那个目录不是任何人选的。
 
 ```yaml
 mihomo:
-  path: ""            # 留空 = 自动发现 mihomo.exe
-  args: []            # 额外启动参数，例如 ['-d', 'C:\mihomo']
-  config: ""          # 显式配置文件路径（也用于读取 external-controller）
+  path: ""            # mihomo.exe；必填、绝对路径
+  home: ""            # 内核的 -d（配置目录）；留空 = 内核默认 %USERPROFILE%\.config\mihomo
+  config: ""          # 内核的 -f（配置文件）；留空且 home 非空 = <home>\config.yaml
+  args: []            # 额外启动参数，原样透传（%NAME% 同样展开）；不要再写 -d/-f/-ext-ctl/-secret
   auto_start: true    # 未运行时自动拉起内核
 controller:
-  address: ""         # 例如 127.0.0.1:9090；留空 = 自动发现
-  secret: ""
+  address: ""         # 仅兜底：内核没有设置 external-controller、或它的配置读不到时才用
+  secret: ""          # 仅兜底：与 address 同一条件
   timeout_ms: 2000
 proxy:
   bypass: []          # 追加到 ProxyOverride，始终包含 <local>
@@ -70,6 +76,8 @@ ui:
   poll_interval_ms: 3000
   dark_menu: auto     # auto | always | never
 ```
+
+`mihomo.args` 里写 `-d`/`-f`/`-ext-ctl`/`-secret` 会被**直接拒绝**（启动期报错并指出该用哪个字段）：同一设置写两处，内核和本程序就会读到不同的文件。
 
 ## 界面语言
 
@@ -89,15 +97,22 @@ ui:
 
 没有对应语言文件时回退内置表：`zh`、`en` 按主语言匹配（`en-GB` 也能命中英文表），其它未支持的语言一律用默认的中文表，不会出现空界面。
 
-## 自动发现（三层，来源互不相同）
+## 内核、配置与控制器来自哪里
 
-| 目标 | 顺序 |
+**没有搜索、也没有端口探测**：三者都按 mihomo 自己的规则解析，认不出来就报错（并指出该改哪一项），而不是猜一个。
+
+| 目标 | 来源 |
 |---|---|
-| `mihomo.exe` | `mihomo.path` → 运行中进程的真实映像（跳过 scoop shim）→ exe 同级/`bin`/`core` → `PATH` → `$SCOOP\shims`、`~\scoop\shims` |
-| 配置文件 | `mihomo.config` → `CLASH_HOME_DIR` + `CLASH_CONFIG_FILE` → `%USERPROFILE%\.config\mihomo\config.yaml` → exe 同级 |
-| 控制器地址 | `controller.address` → `CLASH_OVERRIDE_EXTERNAL_CONTROLLER` / `CLASH_OVERRIDE_SECRET` → 上述配置文件里的 `external-controller` / `secret` → 端口探测（9090/9091/9097/9098/6170，用 `GET /` 校验） |
+| `mihomo.exe` | `tray.yml mihomo.path`（必填、绝对路径） |
+| 配置目录 | `mihomo.home` → `mihomo.config` 所在目录 → 内核默认 `%USERPROFILE%\.config\mihomo`（`XDG_CONFIG_HOME` 仅在该目录不存在时参与，与 mihomo 的判定一致） |
+| 配置文件 | `mihomo.config` → `<配置目录>\config.yaml` |
+| 内核命令行 | 运行中那个内核自己的 argv：`-f`/`-d` 说明它读的是哪份文件，`-ext-ctl`/`-secret` 非空时**覆盖**配置文件（这就是 mihomo 自己的优先级）。同用户的内核可读；提权内核读不到，就跳过这一来源 |
+| 控制器地址 / secret | 上述 argv → `CLASH_OVERRIDE_EXTERNAL_CONTROLLER` / `CLASH_OVERRIDE_SECRET`（这两个环境变量正是同名 flag 的默认值）→ 配置文件里的 `external-controller` / `secret` → `tray.yml` 的 `controller.address` / `secret` |
 
-控制器地址不能只靠解析配置文件：它常由 `-ext-ctl` 或环境变量注入，所以最后一步的探测是必需的。
+- **逐字段判定**：mihomo 侧某个字段没设置、或读不到，才用 `tray.yml` 的同名字段——`controller.*` 是兜底，不是覆盖。
+- 内核没开 `external-controller`、或只开了 `-tls`/`-unix`/`-pipe` 控制器，都会明确报出来（不再靠探测兜）。
+- 本程序启动内核时一律显式传 `-d`/`-f`（绝对路径），所以内核读的就是这里读的那一份；提权副本可能以另一个账户运行，`%USERPROFILE%` 会跟着变，显式 `-d` 正是为此。
+- 唯一看不到的情况：**内核由别的启动器拉起、用 `-ext-ctl`/`-secret` 覆盖了配置、而它的命令行又读不到**（提权）。这时会报不可达/读不到内核配置，请在 `controller.*` 里写实际值。
 
 ## 已知行为
 
@@ -105,7 +120,7 @@ ui:
 - **TUN 失败不会返回 HTTP 错误**（内核只记日志并把 `enable` 置 false），因此本程序以回读 `GET /configs` 的结果为准：回读仍是 `false` 时，用 `ShellExecuteExW("runas")` 启动自身的一个隐藏副本（`--kernel-start-elevated <pid>`），由它停掉旧内核、并按**那个内核自己的命令行**重新启动，然后重试。取消 UAC 没有任何副作用——终止旧内核发生在提权之后。
 - **提权副本只收一个 PID，并用退出码回传新内核的 PID**：映像路径和启动参数都由副本自己从那个进程读出来（`NtQueryInformationProcess`，提权之后连托盘读不到的提权内核也能读）。这既不会把启动参数猜错（`-d`/`-f`/`-ext-ctl` 一律原样保留），也不让副本变成"以管理员身份运行任意程序"的入口——它只接受映像名为 `mihomo.exe` 的进程。退出码 = 新内核 PID 为正，失败为负（`-2` 参数/不是内核、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行）；不走文件/管道回传，因为"由调用者指定路径"就等于给低权限进程一个让管理员写文件的口子。
 - **内核身份按「记录的 PID → 路径身份」判定**：提权后托盘读不到那个进程的映像路径，所以后续操作以副本回传的 PID 为准；没有记录时才比路径，而且比较必须**归一化**（`canonicalize` + 忽略大小写）——scoop 的 `apps\<app>\current\mihomo.exe` 是 junction，进程报告的是解析后的 `apps\<app>\<版本>\mihomo.exe`，直接比字符串永远不相等（这正是"提权后内核停不掉"的根因）。
-- **本程序自己启动内核时会补上 `-d <配置目录>`**（`mihomo.args` 里已有 `-d`/`--d` 就不重复加）；`mihomo.config` 指向一个具体文件时还会带上 `-f <文件>`，因为那个文件不一定叫 `config.yaml`。提权副本可能以另一个账户运行，`%USERPROFILE%` 和 mihomo 自己的默认配置目录都会跟着变。
+- **本程序自己启动内核时总是显式传 `-d <配置目录> -f <配置文件>`**（都由 `tray.yml` 解析成绝对路径），所以内核读的就是这里读的那一份；提权副本可能以另一个账户运行，`%USERPROFILE%` 和 mihomo 自己的默认配置目录都会跟着变。`mihomo.args` 里的相对路径按 **mihomo.exe 所在目录**解析（启动时显式设了工作目录）。
 - **内核一旦提权就一直提权**（TUN 生效之后）：「退出并停止 Mihomo」会再弹一次 UAC，由提权副本按记录下来的 PID 结束它；取消则只提示「提权启动被取消或失败」，程序不退出。
 - **系统代理与 TUN 都不由 mihomo 核心管理**，`Internet Settings` 与监听端口分别由本程序处理；`mixed-port` 从控制器实时读取，不解析 yml。
 - 长列表由系统滚动箭头 + 鼠标滚轮 + 方向键处理（构建菜单时设置了 `MIM_MAXHEIGHT`，这也是官方建议的做法——默认以屏幕高度为上限在多显示器下会失效）。
@@ -122,7 +137,7 @@ ui:
 
 - **托盘自身不提权**：Go 版启动时就用 `ShellExecute("runas")` 把整个程序提权；这里托盘始终普通权限，只有 TUN 需要管理员，由一次性提权副本重启内核（见「已知行为」）。
 - **停止内核只结束本程序启动或路径匹配的实例**：Go 版用 `taskkill /IM mihomo.exe`，会误杀其他实例。
-- **不只认写死的路径**：Go 版固定读 `%USERPROFILE%\.config\mihomo\config.yaml`、只在 PATH / 程序目录 / `~/scoop/shims` 找内核；这里是三层发现链，并支持 `tray.yml` 指定（见「自动发现」）。
+- **内核与配置由 `tray.yml` 指明**：Go 版固定读 `%USERPROFILE%\.config\mihomo\config.yaml`、只在 PATH / 程序目录 / `~/scoop/shims` 找内核；这里 `mihomo.path` / `mihomo.home` / `mihomo.config` 是唯一来源，控制器则按 mihomo 自己的优先级解析（见「内核、配置与控制器来自哪里」）。
 - **新增**：代理分组子菜单（含 `URLTest`/`Fallback` 固定与取消固定）、「打开 Web 面板」、界面语言表与 `lang/*.yml`、可配轮询间隔（Go 版固定 5 s）。
 - **同样不做**（相对 CFW 式图形客户端）：设置窗口、自绘弹窗、节点延迟色点、流量曲线、订阅刷新、脚本执行；需要图形化的设置就用内核自己的面板（菜单里的「打开 Web 面板」）。
 
