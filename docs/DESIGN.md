@@ -295,10 +295,24 @@ ui:
 2. **worker 先刷新再等待**：原实现先 `recv_timeout(poll)` 再刷新，导致首个菜单（3 s 前打开）显示空状态；现改为循环开头立刻刷新，实现中实测发现并修复。
 3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`（`Icons::new` 与 `TaskbarCreated` 重注册时各量一次，主显示器 DPI 变化后重画而不是沿用旧尺寸），无资源文件、无图像库。
 4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
-5. **实测体积/内存**：exe 388.5 KB（397,824 B；i18n 之前 338 KB，增量见 §11.7；本轮"已知差距"修复后再测，之前 381,952 B），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
-6. **单测 79 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"），图标层断言当前尺寸与 `SM_CXSMICON` 一致；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
+5. **实测体积/内存**：exe 329.0 KB（336,896 B；2026-09 体积复查后的数字，复查前 389.0 KB / 398,336 B，见本节「二进制体积复查」），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
+6. **单测 83 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"），图标层断言当前尺寸与 `SM_CXSMICON` 一致；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
 7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（62 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
    **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB，当时的数字），远高于动工前估的 3–4 KB——语言表本体、62 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（62 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
+
+### 二进制体积复查（2026-09）
+
+发布前用 `cargo bloat --release` 加 PE 段表复核了一遍（不是估）。复查前 exe 389.0 KB：`.text` 291.0 / `.rdata` 81.5 / `.pdata` 10.5 / `.data` 2.5 / `.rsrc` 1.5 / `.reloc` 1.0 KiB，段和等于文件大小，没有对齐浪费；`.text` 里 std 占 169.1 KiB（58.1%）、本程序占 81.6 KiB（28.1%）。三块与业务无关的重量：
+
+| 重量 | 实测 | 处理 |
+|---|---|---|
+| `std::process::Command` 及其环境块、参数转义、管道代码 | 同组符号 51.1 KiB，其中 `spawn_with_attributes` 单独 21.8 KiB | 程序只启动一个进程，改为直接调 `CreateProcessW`：**−55.5 KiB**（`6b0ef37`） |
+| panic 打印、backtrace 与 stderr 写入链 | 12.1 + ~4.4 KiB | 只服务「panic 时写给没人看的 stderr」；要砍需 nightly 的 `build-std` + `panic_immediate_abort`，本轮**未做** |
+| i18n 表构造 | `i18n::init` 24.2 KiB（当时二进制里最大的单个函数） | 内置表改 `static`（字段全是 `Cow::Borrowed`，本来就能进 `.rdata`）：**−4.5 KiB**（`e2a1495`）。比预期小：`Messages::clone` 与 62 路 `overlay` 仍在，`i18n::resolve` 现在 19.9 KiB |
+
+结果：exe 398,336 B → **336,896 B（−60.0 KiB，−15.4%）**，`.text` 291.0 → 239.5 KiB。仍高于 §2 的 250 KB 预算（那条是 Phase 0 的选型预算）。
+
+复查顺带记下、**本轮未处理**的几项，都属于便宜且独立的小改动：`Cargo.toml` 开了 `Win32_Security` 而源码零引用；`Cargo.lock` 里 `serde`/`serde_derive`/`syn`/`quote`/`proc-macro2`/`unicode-ident` 不在解析图内（`cargo tree` 只有 `serde_json → itoa/memchr/serde_core/zmij`）；`lang/en-US.yml` 与内置英文表逐条相同、靠测试强同步；`win/{mod,elevate,menu,shell}.rs` 各带一份 `wide()`；`std::env::var`（18 处）会把 `to_lowercase`（3.9 KiB）链进来，换 `GetEnvironmentVariableW` 可去掉。另有一项既有失败：`cargo test`（debug）下 `icon.rs:109` 的 `color * 3` u8 溢出使图标那项失败，`--release` 全绿——与本次改动无关，主树同样失败。
 
 ### 代码审查修复（第二轮，10 项 must-fix + 若干 should-fix）
 
@@ -338,10 +352,11 @@ ui:
 
 同轮记录、**未在本次修复**的差距见 [ROADMAP.md](ROADMAP.md) 的「已知差距」。
 
-### 尚未在自动化中验证、需人工确认的两点
+### 尚未在自动化中验证、需人工确认的三点
 
 - **菜单内的鼠标交互**（悬停展开子菜单、悬停/点击滚动箭头）：自动化向托盘图标窗口 `PostMessage` 弹出菜单时，隐藏窗口拿不到前台激活权，模拟输入无法驱动系统菜单内部循环。滚动箭头的**存在与状态**已验证（`docs/assets/native-menu-scroll-arrows.png`），真实点击托盘图标时应正常。
 - **`PUT /configs?force=true`** 未在本机正在运行的内核上执行（避免改动用户正在使用的代理状态），仅依据上游源码（`hub/route/configs.go:408-444`）与 Go 版（[aoiyukizakura/mihomo-tray](https://github.com/aoiyukizakura/mihomo-tray)）既有实现。
+- **真实内核的启动路径**：`start` 已改走 `CreateProcessW`（`6b0ef37`），同一条路径有单测（真的起 `cmd.exe`，断言 PID 与退出），但没有让一个真 `mihomo.exe` 起过。发布前人工启动一次，确认内核起得来、`-d`/`-f` 里的相对路径仍按内核自己的目录解析。
 
 完整待办与人工验证清单见 [ROADMAP.md](ROADMAP.md)。
 
