@@ -95,6 +95,11 @@ messages! {
     error_path_not_absolute_tpl => "error.path_not_absolute",
     error_path_missing_tpl => "error.path_missing",
     error_flag_in_args_tpl => "error.flag_in_args",
+    error_controller_unset => "error.controller_unset",
+    error_config_unreadable_tpl => "error.config_unreadable",
+    error_controller_missing_tpl => "error.controller_missing",
+    error_controller_other_family_tpl => "error.controller_other_family",
+    error_controller_invalid_tpl => "error.controller_invalid",
     error_read_settings_tpl => "error.read_settings",
     error_window_create_tpl => "error.window_create",
     error_no_kernel_path => "error.no_kernel_path",
@@ -221,6 +226,25 @@ impl Messages {
         )
     }
 
+    pub fn error_config_unreadable(&self, path: &str, error: &str) -> String {
+        self.fill(
+            &self.error_config_unreadable_tpl,
+            &[("path", path), ("error", error)],
+        )
+    }
+
+    pub fn error_controller_missing(&self, path: &str) -> String {
+        self.fill(&self.error_controller_missing_tpl, &[("path", path)])
+    }
+
+    pub fn error_controller_other_family(&self, path: &str) -> String {
+        self.fill(&self.error_controller_other_family_tpl, &[("path", path)])
+    }
+
+    pub fn error_controller_invalid(&self, address: &str) -> String {
+        self.fill(&self.error_controller_invalid_tpl, &[("address", address)])
+    }
+
     pub fn error_json_parse(&self, error: &str) -> String {
         self.fill(&self.error_json_parse_tpl, &[("error", error)])
     }
@@ -326,6 +350,17 @@ impl Messages {
                 "mihomo.args 里不要写 {flag}，请用 {field}；同一设置写两处，内核和本程序会读到不同的文件",
             ),
             error_read_settings_tpl: Cow::Borrowed("读取 {path} 失败: {error}"),
+            error_controller_unset: Cow::Borrowed("没有可用的控制器"),
+            error_config_unreadable_tpl: Cow::Borrowed("读不到内核配置 {path}: {error}"),
+            error_controller_missing_tpl: Cow::Borrowed(
+                "内核没有开启 external-controller（{path} 里没有这一项）",
+            ),
+            error_controller_other_family_tpl: Cow::Borrowed(
+                "内核只设置了 TLS/unix/pipe 控制器（{path}），本程序只支持 http 地址",
+            ),
+            error_controller_invalid_tpl: Cow::Borrowed(
+                "控制器地址无效: {address}（应为 host:port 形式）",
+            ),
             error_window_create_tpl: Cow::Borrowed("启动失败: {error}"),
             error_no_kernel_path: Cow::Borrowed("未找到 mihomo.exe 路径，无法确认要停止的进程"),
             error_no_matching_kernel: Cow::Borrowed("未找到与本程序配置匹配的 mihomo 进程"),
@@ -413,6 +448,19 @@ impl Messages {
                 "Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files",
             ),
             error_read_settings_tpl: Cow::Borrowed("Failed to read {path}: {error}"),
+            error_controller_unset: Cow::Borrowed("No controller is available"),
+            error_config_unreadable_tpl: Cow::Borrowed(
+                "Cannot read the kernel configuration {path}: {error}",
+            ),
+            error_controller_missing_tpl: Cow::Borrowed(
+                "The kernel does not serve external-controller ({path} has no such setting)",
+            ),
+            error_controller_other_family_tpl: Cow::Borrowed(
+                "The kernel only serves a TLS/unix/pipe controller ({path}); this program speaks http",
+            ),
+            error_controller_invalid_tpl: Cow::Borrowed(
+                "Invalid controller address: {address} (expected host:port)",
+            ),
             error_window_create_tpl: Cow::Borrowed("Startup failed: {error}"),
             error_no_kernel_path: Cow::Borrowed(
                 "No mihomo.exe path is known, cannot tell which process to stop",

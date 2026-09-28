@@ -167,8 +167,17 @@ fn image_path(pid: u32) -> (PathBuf, bool) {
 
 /// Start the kernel without a console window; the returned child stays under our
 /// control so "exit and stop mihomo" only affects the instance we launched.
+///
+/// The working directory is set to the kernel's own, because the kernel resolves
+/// a relative path in its arguments against it, and inheriting this program's
+/// would make that depend on how the tray itself was started (an Explorer launch
+/// hands it whatever the shell had). The kernel's directory is at least one its
+/// user knows.
 pub fn start(exe: &Path, args: &[String]) -> Result<Child, String> {
     let mut command = Command::new(exe);
+    if let Some(dir) = exe.parent() {
+        command.current_dir(dir);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -404,9 +413,10 @@ fn is_kernel_name(path: &Path) -> bool {
 /// `NtQueryInformationProcess(ProcessCommandLineInformation)` copies the string
 /// into the caller's buffer, so no PEB walking — and no assumption about the
 /// bitness of the target — is needed. It wants the same rights as any other
-/// query, which is why this lives in the helper: the tray cannot read the kernel
-/// it is about to replace, and the helper can.
-fn command_line(pid: u32) -> Option<Vec<String>> {
+/// query: a kernel of the same user can be read from here, while one of higher
+/// integrity cannot — which is why the elevated helper reads it for the kernel it
+/// is about to replace. `None` is the honest answer in that case.
+pub fn command_line(pid: u32) -> Option<Vec<String>> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {

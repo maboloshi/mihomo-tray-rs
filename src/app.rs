@@ -250,7 +250,9 @@ const KERNEL_STARTUP_BUDGET: Duration = Duration::from_secs(5);
 
 /// Everything an action needs besides the command itself.
 struct Worker<'a> {
-    client: &'a Client,
+    /// The controller to talk to. `None` while none could be resolved: the kernel
+    /// can still be started and stopped, but nothing that needs the controller is.
+    client: Option<&'a Client>,
     state: &'a Shared,
     hwnd: isize,
     /// The kernel this program may start or replace.
@@ -259,11 +261,11 @@ struct Worker<'a> {
 
 /// What bringing the kernel up left behind for the poll loop.
 struct Startup {
-    /// The controller to poll.
-    client: Client,
+    /// The controller to poll, when one could be resolved.
+    client: Option<Client>,
     /// The kernel was started here, so it is worth waiting for it to answer.
     started_kernel: bool,
-    /// Why the kernel could not be brought up, when it could not.
+    /// Why the kernel could not be brought up, or why no controller is known.
     error: Option<String>,
 }
 
@@ -300,19 +302,22 @@ fn look_for_kernel(kernel: &KernelSlot, settings: &Settings) -> Startup {
     // Recorded before anything runs: "exit and stop mihomo" matches the kernel it
     // may stop against this path, including one this program did not start.
     state::write_kernel_path(kernel, path.clone());
-    let client = discover::find_controller(settings).unwrap_or_else(|| {
-        Client::new("127.0.0.1:9090", "", settings.controller_timeout_ms)
-            .expect("default controller address is always valid")
-    });
+    // A controller that cannot be resolved is reported, but it does not stop the
+    // kernel from being started: the system proxy and the elevated restart work
+    // without one.
+    let controller = discover::find_controller(settings);
+    let controller_error = controller.as_ref().err().cloned();
     let mut startup = Startup {
-        client,
+        client: controller.ok(),
         started_kernel: false,
-        error: path_error,
+        error: None,
     };
-    if startup.error.is_some() {
+    if let Some(error) = path_error {
+        startup.error = Some(error);
         return startup;
     }
-    if startup.client.alive() || !settings.mihomo_auto_start {
+    startup.error = controller_error;
+    if startup.client.as_ref().is_some_and(Client::alive) || !settings.mihomo_auto_start {
         return startup;
     }
     let Some(path) = path else {
@@ -358,7 +363,7 @@ fn spawn_worker(
         .spawn(move || {
             let startup = startup(&kernel, &settings, &state, hwnd);
             let worker = Worker {
-                client: &startup.client,
+                client: startup.client.as_ref(),
                 state: &state,
                 hwnd,
                 kernel: &kernel,
@@ -370,7 +375,10 @@ fn spawn_worker(
             // note stays up until it does, so a kernel that needs longer than the
             // budget does not look like a tray that never came up.
             let mut waiting_for_kernel = false;
-            if startup.started_kernel {
+            // Nothing to wait for without a controller: "the kernel has not
+            // answered" would be a claim about a question that was never asked,
+            // and the controller error already says what is missing.
+            if startup.started_kernel && worker.client.is_some() {
                 // Say what is going on before the bounded wait: the icon is
                 // registered already, and this is what the user sees until the
                 // kernel answers.
@@ -420,13 +428,22 @@ fn spawn_worker(
 }
 
 fn execute(worker: &Worker, command: &Command) -> Option<String> {
+    let Some(client) = worker.client else {
+        // Without a controller the two process commands are still worth carrying
+        // out; everything else can only answer that there is nothing to talk to.
+        return match command {
+            Command::StopKernelElevated => stop_kernel_elevated(worker),
+            Command::Refresh => None,
+            _ => Some(i18n::t().error_controller_unset.to_string()),
+        };
+    };
     let result = match command {
-        Command::SetMode(mode) => worker.client.set_mode(mode),
+        Command::SetMode(mode) => client.set_mode(mode),
         // TUN is not a plain request: see `set_tun`.
         Command::SetTun(enable) => return set_tun(worker, *enable),
-        Command::Select { group, member } => worker.client.select(group, member),
-        Command::Unfix(group) => worker.client.unfix(group),
-        Command::Reload => worker.client.reload(),
+        Command::Select { group, member } => client.select(group, member),
+        Command::Unfix(group) => client.unfix(group),
+        Command::Reload => client.reload(),
         Command::StopKernelElevated => return stop_kernel_elevated(worker),
         Command::Refresh => Ok(()),
     };
@@ -442,13 +459,18 @@ fn execute(worker: &Worker, command: &Command) -> Option<String> {
 /// replaced by an elevated one (a second, short-lived process of this program,
 /// started through the UAC prompt) and the request is repeated.
 fn set_tun(worker: &Worker, enable: bool) -> Option<String> {
+    // TUN is a controller setting and is read back from the controller, so
+    // without one there is nothing here that could be told it worked.
+    let Some(client) = worker.client else {
+        return Some(i18n::t().error_controller_unset.to_string());
+    };
     if !enable {
-        return worker.client.set_tun(false).err();
+        return client.set_tun(false).err();
     }
-    if let Err(error) = worker.client.set_tun(true) {
+    if let Err(error) = client.set_tun(true) {
         return Some(error);
     }
-    if read_tun(worker.client) == Some(true) {
+    if read_tun(client) == Some(true) {
         return None;
     }
     let Some(pid) = our_kernel(worker) else {
@@ -477,11 +499,11 @@ fn set_tun(worker: &Worker, enable: bool) -> Option<String> {
     // what "exit and stop mihomo" hands back to the helper later.
     state::write_kernel_pid(worker.state, (code > 0).then_some(code as u32));
 
-    wait_for_kernel(worker.client);
-    if let Err(error) = worker.client.set_tun(true) {
+    wait_for_kernel(client);
+    if let Err(error) = client.set_tun(true) {
         return Some(error);
     }
-    match read_tun(worker.client) {
+    match read_tun(client) {
         Some(true) => None,
         _ => Some(i18n::t().error_tun_ineffective.to_string()),
     }
@@ -601,10 +623,14 @@ fn wait_for_kernel(client: &Client) {
 /// Wait, bounded, for a kernel this program just started to answer.
 ///
 /// Returns whether it answered within the budget. The kernel is probed where its
-/// own configuration says it listens — the client that was discovered — with
+/// own configuration says it listens — the client that was resolved — with
 /// `Client::alive` asking its own short question, so one iteration cannot take
-/// the configured request timeout while the kernel is still coming up.
-fn wait_for_controller(client: &Client) -> bool {
+/// the configured request timeout while the kernel is still coming up. Without a
+/// controller there is nothing to wait for.
+fn wait_for_controller(client: Option<&Client>) -> bool {
+    let Some(client) = client else {
+        return false;
+    };
     let deadline = std::time::Instant::now() + KERNEL_STARTUP_BUDGET;
     while std::time::Instant::now() < deadline {
         if client.alive() {
@@ -638,7 +664,7 @@ fn show_note(state: &Shared, hwnd: isize, message: Option<String>) {
 /// `web_url` is the panel template from `tray.yml`; the snapshot carries what it
 /// resolves to against the controller, so the UI thread never needs the address.
 fn refresh(
-    client: &Client,
+    client: Option<&Client>,
     web_url: &str,
     shared: &Shared,
     version: &mut String,
@@ -652,29 +678,34 @@ fn refresh(
         action_error: previous.action_error,
         status_note: previous.status_note,
         kernel_pid: previous.kernel_pid,
-        web_ui_url: client.web_ui_url(web_url),
         ..Default::default()
     };
 
-    match client.configs() {
-        Ok((mode, port, tun)) => {
-            snapshot.controller_ok = true;
-            snapshot.mode = mode;
-            snapshot.mixed_port = port;
-            snapshot.tun = tun;
-            if version.is_empty() {
-                // One extra request, only until it succeeds.
-                *version = client.version().unwrap_or_default();
+    // With no controller to talk to the snapshot stays empty and the reason is
+    // already in the error channel — the startup report or the last action. An
+    // address invented here would only report an error about the wrong kernel.
+    if let Some(client) = client {
+        snapshot.web_ui_url = client.web_ui_url(web_url);
+        match client.configs() {
+            Ok((mode, port, tun)) => {
+                snapshot.controller_ok = true;
+                snapshot.mode = mode;
+                snapshot.mixed_port = port;
+                snapshot.tun = tun;
+                if version.is_empty() {
+                    // One extra request, only until it succeeds.
+                    *version = client.version().unwrap_or_default();
+                }
+                snapshot.version = version.clone();
+                if let Ok(groups) = client.proxies() {
+                    snapshot.groups = groups;
+                }
             }
-            snapshot.version = version.clone();
-            if let Ok(groups) = client.proxies() {
-                snapshot.groups = groups;
+            Err(error) => {
+                snapshot.controller_ok = false;
+                snapshot.controller_error =
+                    Some(i18n::t().error_controller_unreachable(&client.address(), &error));
             }
-        }
-        Err(error) => {
-            snapshot.controller_ok = false;
-            snapshot.controller_error =
-                Some(i18n::t().error_controller_unreachable(&client.address(), &error));
         }
     }
 

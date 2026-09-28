@@ -61,6 +61,11 @@ error:
   path_missing: "{field} points at a path that does not exist: {path}"
   flag_in_args: "Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files"
   read_settings: "Failed to read {path}: {error}"
+  controller_unset: No controller is available
+  config_unreadable: "Cannot read the kernel configuration {path}: {error}"
+  controller_missing: "The kernel does not serve external-controller ({path} has no such setting)"
+  controller_other_family: "The kernel only serves a TLS/unix/pipe controller ({path}); this program speaks http"
+  controller_invalid: "Invalid controller address: {address} (expected host:port)"
   window_create: "Startup failed: {error}"
   no_kernel_path: "No mihomo.exe path is known, cannot tell which process to stop"
   no_matching_kernel: "No mihomo process matches this program's configuration"
