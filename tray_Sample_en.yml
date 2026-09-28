@@ -1,0 +1,43 @@
+# mihomo-tray settings.
+#
+# A small YAML subset: top level keys, one nesting level, '#' comments, quoted
+# scalars and inline [a, b] lists.
+#
+# Paths must be absolute: a drive path (C:\...) or a UNC path
+# (\\server\share\...). %NAME% is expanded the way cmd expands it, so a path can
+# stay machine independent. Relative paths and ~ are refused on purpose: mihomo
+# would resolve them against its own working directory, which for a kernel this
+# program starts is a directory nobody chose.
+
+mihomo:
+  path: ""             # mihomo.exe to start; required, absolute, e.g.
+                       # %USERPROFILE%\scoop\apps\mihomo\current\mihomo.exe
+  home: ""             # mihomo's -d (configuration directory);
+                       # empty = the kernel's own default (%USERPROFILE%\.config\mihomo)
+  config: ""           # mihomo's -f (configuration file);
+                       # empty = <home>\config.yaml when home is set
+  args: []             # extra kernel arguments, passed through as written
+                       # (%NAME% is expanded here too)
+  auto_start: true     # start the kernel on launch when it is not running
+
+controller:
+  address: ""          # fallback only: used when the kernel sets no external-controller,
+                       # or when its own configuration cannot be read
+  secret: ""           # fallback only: same condition as address
+  timeout_ms: 2000
+
+proxy:
+  bypass: []           # extra ProxyOverride entries; '<local>' is always added
+
+groups:
+  order: []            # explicit group order; the rest is sorted case-insensitively
+  include: []          # empty = every selector group
+  exclude: []
+  page_size: 0         # 0 = let the system scroll long menus; >0 = page long groups
+
+ui:
+  web_url: ""          # dashboard to open; empty = http://<controller address>/ui/
+                       # {host}, {port} and {secret} are filled in from the controller,
+                       # e.g. "https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}"
+  poll_interval_ms: 3000
+  dark_menu: auto      # auto | always | never

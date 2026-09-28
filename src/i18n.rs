@@ -423,6 +423,7 @@ impl Messages {
 }
 
 static MESSAGES: OnceLock<Messages> = OnceLock::new();
+static LANGUAGE: OnceLock<String> = OnceLock::new();
 
 /// The active table. Without [`init`] (unit tests) this is the built-in default,
 /// so no call site has to handle "no language chosen yet".
@@ -430,12 +431,25 @@ pub fn t() -> &'static Messages {
     MESSAGES.get_or_init(Messages::zh_cn)
 }
 
+/// The primary subtag of the active UI language: `zh` or `en`, whichever table
+/// the messages come from.
+///
+/// This is the one thing outside this module that depends on the language rather
+/// than on a message: the sample `tray.yml` written on first run, which should be
+/// in a language its reader understands. Without [`init`] it is the default
+/// table's subtag, exactly like [`t`] is the default table.
+pub fn language() -> &'static str {
+    LANGUAGE.get().map_or(DEFAULT_LANGUAGE, String::as_str)
+}
+
 /// Resolve and install the UI language.
 ///
 /// Called first thing in `main`: code that runs later reports failures through
 /// this table, so the language has to be settled before anything can fail.
 pub fn init() {
-    let _ = MESSAGES.set(resolve(&system_tag()));
+    let tag = system_tag();
+    let _ = MESSAGES.set(resolve(&tag));
+    let _ = LANGUAGE.set(primary(&tag).to_string());
 }
 
 fn resolve(tag: &str) -> Messages {
@@ -467,15 +481,23 @@ fn fallback() -> Messages {
 /// finds the English table. Anything unrecognised falls back to the default, so
 /// an unsupported language degrades to a working UI instead of an empty one.
 fn builtin(tag: &str) -> Messages {
-    match tag.split(['-', '_']).next().unwrap_or_default() {
+    match primary(tag) {
         "en" => Messages::en_us(),
         _ => Messages::zh_cn(),
     }
 }
 
+/// The primary subtag of a BCP-47 tag: `en-GB` and `en_US` are both `en`.
+fn primary(tag: &str) -> &str {
+    tag.split(['-', '_']).next().unwrap_or_default()
+}
+
 /// The tag of the default table, and the answer when Windows cannot report a UI
 /// language at all.
 const DEFAULT_TAG: &str = "zh-CN";
+
+/// The primary subtag of [`DEFAULT_TAG`], used before a language is installed.
+const DEFAULT_LANGUAGE: &str = "zh";
 
 /// The Windows UI language as a BCP-47 tag such as `zh-CN` or `ja-JP`. The tag
 /// doubles as the language-file name, so a translation is picked up by naming it
@@ -636,6 +658,16 @@ mod tests {
         // Unsupported languages keep the default table rather than an empty UI.
         assert_eq!(builtin("ja-JP").menu_exit.to_string(), "退出");
         assert_eq!(builtin("zh-TW").menu_exit.to_string(), "退出");
+    }
+
+    #[test]
+    fn the_language_is_the_primary_subtag() {
+        assert_eq!(primary("zh-CN"), "zh");
+        assert_eq!(primary("en_US"), "en");
+        assert_eq!(primary("en"), "en");
+        assert_eq!(primary(DEFAULT_TAG), DEFAULT_LANGUAGE);
+        // Before `init` it mirrors `t()`: the built-in default table's language.
+        assert_eq!(language(), DEFAULT_LANGUAGE);
     }
 
     #[test]

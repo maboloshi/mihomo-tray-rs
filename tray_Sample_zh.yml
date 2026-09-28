@@ -1,0 +1,39 @@
+# mihomo-tray 设置文件。
+#
+# 只支持 YAML 的一个小子集：顶层键、一层嵌套、'#' 注释、引号标量和内联 [a, b] 列表。
+#
+# 路径必须是绝对路径：盘符路径（C:\...）或 UNC 路径（\\server\share\...）。
+# %NAME% 按 cmd 的方式展开，所以路径可以保持与机器无关。相对路径和 ~ 会被拒绝：
+# mihomo 会拿它们去拼自己的当前工作目录，而由本程序启动的内核，那个目录不是任何人
+# 选择过的。
+
+mihomo:
+  path: ""             # 要启动的 mihomo.exe；必填、绝对路径，例如
+                       # %USERPROFILE%\scoop\apps\mihomo\current\mihomo.exe
+  home: ""             # mihomo 的 -d（配置目录）；
+                       # 留空 = 用内核自己的默认目录（%USERPROFILE%\.config\mihomo）
+  config: ""           # mihomo 的 -f（配置文件）；
+                       # 留空且 home 非空 = <home>\config.yaml
+  args: []             # 额外的内核启动参数，原样透传（其中的 %NAME% 也会展开）
+  auto_start: true     # 启动本程序时，若内核没在运行就把它启动起来
+
+controller:
+  address: ""          # 仅作兜底：内核没有设置 external-controller、或它的配置读不到时使用
+  secret: ""           # 仅作兜底：与 address 同一条件
+  timeout_ms: 2000
+
+proxy:
+  bypass: []           # 额外的 ProxyOverride 项；'<local>' 总是会加上
+
+groups:
+  order: []            # 显式指定分组顺序；其余按名称不区分大小写排序
+  include: []          # 留空 = 所有 selector 分组
+  exclude: []
+  page_size: 0         # 0 = 交给系统滚动长菜单；>0 = 每页显示的分组数
+
+ui:
+  web_url: ""          # 要打开的面板地址；留空 = http://<控制器地址>/ui/
+                       # {host}、{port}、{secret} 会用当前控制器的值填入，例如
+                       # "https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}"
+  poll_interval_ms: 3000
+  dark_menu: auto      # auto | always | never

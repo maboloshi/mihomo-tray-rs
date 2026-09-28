@@ -24,9 +24,11 @@ fn main() {
     }
 
     let settings_path = settings::settings_path();
-    settings::ensure_default_file(&settings_path);
-    // First, because everything below reports failures through the UI strings.
+    // First, because everything below reports failures through the UI strings —
+    // and because the sample `tray.yml` is written in the language those strings
+    // are in.
     i18n::init();
+    settings::ensure_default_file(&settings_path, settings::default_file(i18n::language()));
     let (settings, settings_error) = settings::load(&settings_path);
     let fatal = settings_error.map(|error| {
         i18n::t().error_read_settings(&error.path.display().to_string(), &error.error.to_string())

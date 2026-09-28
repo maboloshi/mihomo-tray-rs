@@ -14,7 +14,7 @@ pub enum DarkMenu {
     Never,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub mihomo_path: String,
     pub mihomo_args: Vec<String>,
@@ -58,46 +58,33 @@ impl Default for Settings {
     }
 }
 
-pub const DEFAULT_FILE: &str = "\
-# mihomo-tray settings. Everything here is optional.
-# This is a small YAML subset: top level keys, one nesting level, '#' comments,
-# quoted scalars and inline [a, b] lists.
-
-mihomo:
-  path: \"\"            # empty = auto discover mihomo.exe
-  args: []             # extra launch arguments, e.g. ['-d', 'C:\\mihomo']
-  config: \"\"          # explicit config file path (also used to read external-controller)
-  auto_start: true     # start the kernel on launch when it is not running
-
-controller:
-  address: \"\"         # e.g. 127.0.0.1:9090; empty = auto discover
-  secret: \"\"
-  timeout_ms: 2000
-
-proxy:
-  bypass: []           # extra ProxyOverride entries; '<local>' is always added
-
-groups:
-  order: []            # explicit group order; the rest is sorted case-insensitively
-  include: []          # empty = every selector group
-  exclude: []
-  page_size: 0         # 0 = let the system scroll long menus; >0 = page long groups
-
-ui:
-  web_url: \"\"         # dashboard to open; empty = http://<controller address>/ui/
-                       # {host}, {port} and {secret} are filled in from the controller,
-                       # e.g. \"https://board.zash.run.place/#/setup?hostname={host}&port={port}&secret={secret}\"
-  poll_interval_ms: 3000
-  dark_menu: auto      # auto | always | never
-";
+/// The commented template written when there is no `tray.yml` anywhere, one file
+/// per language the project ships.
+///
+/// Both samples are part of the source, so the file a user edits and the file
+/// this program would write are literally the same text: the copy in the
+/// repository cannot drift from the generated one. `language` is a primary
+/// subtag (`zh`, `en`, …); anything else gets English, which is also the table
+/// every message falls back to.
+pub fn default_file(language: &str) -> &'static str {
+    match language {
+        "zh" => include_str!("../tray_Sample_zh.yml"),
+        _ => include_str!("../tray_Sample_en.yml"),
+    }
+}
 
 /// `tray.yml` next to the executable wins (portable layout), otherwise the file
 /// lives in `%APPDATA%\mihomo-tray`.
+///
+/// The portable file has to carry something to count. Scoop's manifest creates an
+/// empty one next to the executable, and an empty file would otherwise win over
+/// the settings the user actually edits in `%APPDATA%` — every line of them
+/// silently ignored, which is exactly what happened on a real machine.
 pub fn settings_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let portable = dir.join("tray.yml");
-            if portable.exists() {
+            if has_content(&portable) {
                 return portable;
             }
         }
@@ -106,6 +93,13 @@ pub fn settings_path() -> PathBuf {
         return PathBuf::from(appdata).join("mihomo-tray").join("tray.yml");
     }
     PathBuf::from("tray.yml")
+}
+
+/// Whether `path` holds something a user could have meant as settings: anything
+/// but whitespace, a BOM included. A file that cannot be read at all counts as
+/// empty too, so an unreadable portable file does not shadow the `%APPDATA%` one.
+fn has_content(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| !strip_bom(&text).trim().is_empty())
 }
 
 /// A settings file that exists but could not be read. The message is rendered by
@@ -132,15 +126,15 @@ pub fn load(path: &Path) -> (Settings, Option<LoadError>) {
 }
 
 /// Write the commented default file when it is missing, so users have something
-/// to edit.
-pub fn ensure_default_file(path: &Path) {
+/// to edit. `text` is the sample for the active language — [`default_file`].
+pub fn ensure_default_file(path: &Path, text: &str) {
     if path.exists() {
         return;
     }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(path, DEFAULT_FILE);
+    let _ = std::fs::write(path, text);
 }
 
 fn parse(text: &str) -> Settings {
@@ -300,16 +294,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_default_file() {
-        let s = parse(DEFAULT_FILE);
-        assert_eq!(s.mihomo_path, "");
-        assert!(s.mihomo_args.is_empty());
-        assert!(s.mihomo_auto_start);
-        assert_eq!(s.controller_timeout_ms, 2000);
-        assert_eq!(s.poll_interval_ms, 3000);
-        assert_eq!(s.groups_page_size, 0);
-        assert_eq!(s.dark_menu, DarkMenu::Auto);
-        assert!(s.web_url.is_empty());
+    fn both_samples_describe_the_same_defaults() {
+        // The samples differ only in comments, so they have to parse to the very
+        // same settings: a translation that changed a value would otherwise
+        // change how the program behaves with the UI language.
+        let en = parse(default_file("en"));
+        let zh = parse(default_file("zh"));
+        assert_eq!(en, zh);
+        assert_eq!(en, Settings::default());
+        // An unsupported language still gets a usable file rather than nothing.
+        assert_eq!(parse(default_file("ja")), en);
+    }
+
+    #[test]
+    fn an_empty_portable_file_is_not_settings() {
+        // Scoop's manifest creates an empty `tray.yml` next to the executable;
+        // counting it as settings is what silently ignored the user's own file.
+        let dir = std::env::temp_dir().join("mihomo-tray-test-settings-content");
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty.yml");
+        std::fs::write(&empty, "").unwrap();
+        let blank = dir.join("blank.yml");
+        std::fs::write(&blank, "\u{feff}\r\n  \n").unwrap();
+        let real = dir.join("real.yml");
+        std::fs::write(&real, "mixed-port: 7890\n").unwrap();
+        let missing = dir.join("missing.yml");
+
+        assert!(!has_content(&empty), "an empty file is not settings");
+        assert!(!has_content(&blank), "whitespace is not settings");
+        assert!(!has_content(&missing), "a missing file is not settings");
+        assert!(has_content(&real));
+
+        let _ = std::fs::remove_file(&empty);
+        let _ = std::fs::remove_file(&blank);
+        let _ = std::fs::remove_file(&real);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
@@ -358,7 +377,7 @@ ui:
     fn a_bom_does_not_hide_the_first_section() {
         // A file saved by a Windows editor may start with a BOM; without skipping
         // it the first section is called `\u{feff}mihomo` and its keys are lost.
-        let text = format!("\u{feff}{}", DEFAULT_FILE);
+        let text = format!("\u{feff}{}", default_file("zh"));
         let s = parse(&text);
         assert_eq!(s.controller_timeout_ms, 2000);
         assert_eq!(s.poll_interval_ms, 3000);
