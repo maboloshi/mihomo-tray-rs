@@ -354,281 +354,258 @@ impl Messages {
 
 /// The built-in tables. Strings here are the ones this code used to carry
 /// inline; treat every value as a released interface, not a scratch string.
-impl Messages {
-    fn zh_cn() -> Self {
-        Self {
-            menu_system_proxy: Cow::Borrowed("系统代理"),
-            menu_mode: Cow::Borrowed("代理模式"),
-            menu_mode_rule: Cow::Borrowed("Rule (规则)"),
-            menu_mode_global: Cow::Borrowed("Global (全局)"),
-            menu_mode_direct: Cow::Borrowed("Direct (直连)"),
-            menu_tun: Cow::Borrowed("TUN 模式"),
-            menu_groups: Cow::Borrowed("代理分组"),
-            menu_group_label_tpl: Cow::Borrowed("{name} ({kind})"),
-            menu_group_label_pinned_tpl: Cow::Borrowed("{name} ({kind} · 已固定)"),
-            menu_unfix: Cow::Borrowed("自动（取消固定）"),
-            menu_truncated: Cow::Borrowed("(项目过多，已省略)"),
-            menu_empty: Cow::Borrowed("(空)"),
-            menu_autostart: Cow::Borrowed("开机自启动"),
-            menu_reload: Cow::Borrowed("重载配置"),
-            menu_close_connections: Cow::Borrowed("关闭所有连接"),
-            menu_restart_kernel: Cow::Borrowed("重启内核"),
-            menu_force_restart_kernel: Cow::Borrowed("强制重启内核"),
-            menu_web_ui: Cow::Borrowed("打开 Web 面板"),
-            menu_more: Cow::Borrowed("更多"),
-            menu_exit: Cow::Borrowed("退出"),
-            menu_exit_stop_kernel: Cow::Borrowed("退出并停止 Mihomo"),
-            menu_exit_only: Cow::Borrowed("仅退出程序"),
+///
+/// They are `static` rather than constructors on purpose: every field is a
+/// `Cow::Borrowed` literal, so both tables are data the linker places in
+/// `.rdata`, where building 62 fields per table at every start used to be the
+/// largest single function in the binary.
+static ZH_CN: Messages = Messages {
+    menu_system_proxy: Cow::Borrowed("系统代理"),
+    menu_mode: Cow::Borrowed("代理模式"),
+    menu_mode_rule: Cow::Borrowed("Rule (规则)"),
+    menu_mode_global: Cow::Borrowed("Global (全局)"),
+    menu_mode_direct: Cow::Borrowed("Direct (直连)"),
+    menu_tun: Cow::Borrowed("TUN 模式"),
+    menu_groups: Cow::Borrowed("代理分组"),
+    menu_group_label_tpl: Cow::Borrowed("{name} ({kind})"),
+    menu_group_label_pinned_tpl: Cow::Borrowed("{name} ({kind} · 已固定)"),
+    menu_unfix: Cow::Borrowed("自动（取消固定）"),
+    menu_truncated: Cow::Borrowed("(项目过多，已省略)"),
+    menu_empty: Cow::Borrowed("(空)"),
+    menu_autostart: Cow::Borrowed("开机自启动"),
+    menu_reload: Cow::Borrowed("重载配置"),
+    menu_close_connections: Cow::Borrowed("关闭所有连接"),
+    menu_restart_kernel: Cow::Borrowed("重启内核"),
+    menu_force_restart_kernel: Cow::Borrowed("强制重启内核"),
+    menu_web_ui: Cow::Borrowed("打开 Web 面板"),
+    menu_more: Cow::Borrowed("更多"),
+    menu_exit: Cow::Borrowed("退出"),
+    menu_exit_stop_kernel: Cow::Borrowed("退出并停止 Mihomo"),
+    menu_exit_only: Cow::Borrowed("仅退出程序"),
 
-            status_running_tpl: Cow::Borrowed("Mihomo 状态: 运行中 ({mode})"),
-            status_controller_unreachable: Cow::Borrowed("Mihomo 状态: 内核运行中，控制器不可达"),
-            status_stopped: Cow::Borrowed("Mihomo 状态: 未运行"),
-            status_looking_kernel: Cow::Borrowed("正在查找内核…"),
-            status_starting_kernel: Cow::Borrowed("正在启动内核…"),
-            status_kernel_silent: Cow::Borrowed("内核尚未应答，仍在等待"),
-            status_restarting_kernel: Cow::Borrowed("正在重启内核…"),
-            status_force_restarting: Cow::Borrowed("正在停止内核，并按 tray.yml 重新启动…"),
-            status_elevating_kernel: Cow::Borrowed("正在以管理员身份重启内核…"),
-            status_elevating_stop: Cow::Borrowed("正在以管理员权限停止内核…"),
-            state_on: Cow::Borrowed("开"),
-            state_off: Cow::Borrowed("关"),
-            tooltip_kernel_tpl: Cow::Borrowed("内核: mihomo {version}"),
-            tooltip_proxy_tun_tpl: Cow::Borrowed("系统代理: {proxy} · TUN: {tun}"),
-            tooltip_port_tpl: Cow::Borrowed("端口: {port}"),
+    status_running_tpl: Cow::Borrowed("Mihomo 状态: 运行中 ({mode})"),
+    status_controller_unreachable: Cow::Borrowed("Mihomo 状态: 内核运行中，控制器不可达"),
+    status_stopped: Cow::Borrowed("Mihomo 状态: 未运行"),
+    status_looking_kernel: Cow::Borrowed("正在查找内核…"),
+    status_starting_kernel: Cow::Borrowed("正在启动内核…"),
+    status_kernel_silent: Cow::Borrowed("内核尚未应答，仍在等待"),
+    status_restarting_kernel: Cow::Borrowed("正在重启内核…"),
+    status_force_restarting: Cow::Borrowed("正在停止内核，并按 tray.yml 重新启动…"),
+    status_elevating_kernel: Cow::Borrowed("正在以管理员身份重启内核…"),
+    status_elevating_stop: Cow::Borrowed("正在以管理员权限停止内核…"),
+    state_on: Cow::Borrowed("开"),
+    state_off: Cow::Borrowed("关"),
+    tooltip_kernel_tpl: Cow::Borrowed("内核: mihomo {version}"),
+    tooltip_proxy_tun_tpl: Cow::Borrowed("系统代理: {proxy} · TUN: {tun}"),
+    tooltip_port_tpl: Cow::Borrowed("端口: {port}"),
 
-            error_kernel_not_found: Cow::Borrowed(
-                "未找到 mihomo.exe，请在 tray.yml 中设置 mihomo.path",
-            ),
-            error_path_not_absolute_tpl: Cow::Borrowed(
-                "{field} 必须是绝对路径: {value}（%VAR% 展开后为 {expanded}）",
-            ),
-            error_path_missing_tpl: Cow::Borrowed("{field} 指向的路径不存在: {path}"),
-            error_flag_in_args_tpl: Cow::Borrowed(
-                "mihomo.args 里不要写 {flag}，请用 {field}；同一设置写两处，内核和本程序会读到不同的文件",
-            ),
-            error_read_settings_tpl: Cow::Borrowed("读取 {path} 失败: {error}"),
-            error_controller_unset: Cow::Borrowed("没有可用的控制器"),
-            error_config_unreadable_tpl: Cow::Borrowed("读不到内核配置 {path}: {error}"),
-            error_controller_missing_tpl: Cow::Borrowed(
-                "内核没有开启 external-controller（{path} 里没有这一项）",
-            ),
-            error_controller_other_family_tpl: Cow::Borrowed(
-                "内核只设置了 TLS/unix/pipe 控制器（{path}），本程序只支持 http 地址",
-            ),
-            error_controller_invalid_tpl: Cow::Borrowed(
-                "控制器地址无效: {address}（应为 host:port 形式）",
-            ),
-            error_controller_tls_tpl: Cow::Borrowed(
-                "控制器地址 {address} 用的是 https：本程序没有 TLS 客户端，不会降级为明文连接；请改用 http 或自行套隧道",
-            ),
-            error_single_instance: Cow::Borrowed(
-                "mihomo-tray 已在运行（图标在通知区域，Windows 11 上可能在溢出区里）",
-            ),
-            error_window_create_tpl: Cow::Borrowed("启动失败: {error}"),
-            error_no_kernel_path: Cow::Borrowed("未找到 mihomo.exe 路径，无法确认要停止的进程"),
-            error_no_matching_kernel: Cow::Borrowed("未找到与本程序配置匹配的 mihomo 进程"),
-            error_spawn_worker_tpl: Cow::Borrowed("无法启动轮询线程: {error}"),
-            error_controller_unreachable_tpl: Cow::Borrowed("控制器 {address} 不可达: {error}"),
-            error_winhttp_open: Cow::Borrowed("WinHttpOpen 失败"),
-            error_request_failed: Cow::Borrowed("请求失败"),
-            error_response_too_large: Cow::Borrowed("响应过大（超过 8 MiB）"),
-            error_http_request_failed: Cow::Borrowed("HTTP 请求失败"),
-            error_json_parse_tpl: Cow::Borrowed("JSON 解析失败: {error}"),
-            error_start_process_tpl: Cow::Borrowed("启动 {path} 失败: {error}"),
-            error_open_process_tpl: Cow::Borrowed("无法打开进程 {pid}"),
-            error_kill_process_tpl: Cow::Borrowed("结束进程 {pid} 失败"),
-            error_open_run_key_tpl: Cow::Borrowed("打开 Run 键失败: {error}"),
-            error_current_exe_tpl: Cow::Borrowed("获取程序路径失败: {error}"),
-            error_write_autostart_tpl: Cow::Borrowed("写入自启动项失败: {error}"),
-            error_delete_autostart_tpl: Cow::Borrowed("删除自启动项失败: {error}"),
-            error_elevate_cancelled: Cow::Borrowed("提权启动被取消或失败"),
-            error_elevate_timeout: Cow::Borrowed("等待管理员授权超时"),
-            error_elevated_kernel_failed: Cow::Borrowed("以管理员权限启动内核失败"),
-            error_tun_ineffective: Cow::Borrowed("TUN 未生效（通常需要管理员权限）"),
-            error_kernel_needs_admin: Cow::Borrowed("内核以管理员权限运行，本程序无权停止它"),
-            error_kernel_args: Cow::Borrowed("无法读取内核自己的启动参数，未重启内核"),
-            error_message_window: Cow::Borrowed("创建消息窗口失败"),
-            error_open_web_ui_tpl: Cow::Borrowed(
-                "打开 Web 面板失败: 无法用默认浏览器打开（ShellExecute 返回 {code}）",
-            ),
-            error_open_internet_settings_tpl: Cow::Borrowed("打开 Internet Settings 失败: {error}"),
-            error_set_proxy_enable_tpl: Cow::Borrowed("设置 ProxyEnable 失败: {error}"),
-            error_set_proxy_server_tpl: Cow::Borrowed("设置 ProxyServer 失败: {error}"),
-            error_set_proxy_override_tpl: Cow::Borrowed("设置 ProxyOverride 失败: {error}"),
+    error_kernel_not_found: Cow::Borrowed("未找到 mihomo.exe，请在 tray.yml 中设置 mihomo.path"),
+    error_path_not_absolute_tpl: Cow::Borrowed(
+        "{field} 必须是绝对路径: {value}（%VAR% 展开后为 {expanded}）",
+    ),
+    error_path_missing_tpl: Cow::Borrowed("{field} 指向的路径不存在: {path}"),
+    error_flag_in_args_tpl: Cow::Borrowed(
+        "mihomo.args 里不要写 {flag}，请用 {field}；同一设置写两处，内核和本程序会读到不同的文件",
+    ),
+    error_read_settings_tpl: Cow::Borrowed("读取 {path} 失败: {error}"),
+    error_controller_unset: Cow::Borrowed("没有可用的控制器"),
+    error_config_unreadable_tpl: Cow::Borrowed("读不到内核配置 {path}: {error}"),
+    error_controller_missing_tpl: Cow::Borrowed(
+        "内核没有开启 external-controller（{path} 里没有这一项）",
+    ),
+    error_controller_other_family_tpl: Cow::Borrowed(
+        "内核只设置了 TLS/unix/pipe 控制器（{path}），本程序只支持 http 地址",
+    ),
+    error_controller_invalid_tpl: Cow::Borrowed("控制器地址无效: {address}（应为 host:port 形式）"),
+    error_controller_tls_tpl: Cow::Borrowed(
+        "控制器地址 {address} 用的是 https：本程序没有 TLS 客户端，不会降级为明文连接；请改用 http 或自行套隧道",
+    ),
+    error_single_instance: Cow::Borrowed(
+        "mihomo-tray 已在运行（图标在通知区域，Windows 11 上可能在溢出区里）",
+    ),
+    error_window_create_tpl: Cow::Borrowed("启动失败: {error}"),
+    error_no_kernel_path: Cow::Borrowed("未找到 mihomo.exe 路径，无法确认要停止的进程"),
+    error_no_matching_kernel: Cow::Borrowed("未找到与本程序配置匹配的 mihomo 进程"),
+    error_spawn_worker_tpl: Cow::Borrowed("无法启动轮询线程: {error}"),
+    error_controller_unreachable_tpl: Cow::Borrowed("控制器 {address} 不可达: {error}"),
+    error_winhttp_open: Cow::Borrowed("WinHttpOpen 失败"),
+    error_request_failed: Cow::Borrowed("请求失败"),
+    error_response_too_large: Cow::Borrowed("响应过大（超过 8 MiB）"),
+    error_http_request_failed: Cow::Borrowed("HTTP 请求失败"),
+    error_json_parse_tpl: Cow::Borrowed("JSON 解析失败: {error}"),
+    error_start_process_tpl: Cow::Borrowed("启动 {path} 失败: {error}"),
+    error_open_process_tpl: Cow::Borrowed("无法打开进程 {pid}"),
+    error_kill_process_tpl: Cow::Borrowed("结束进程 {pid} 失败"),
+    error_open_run_key_tpl: Cow::Borrowed("打开 Run 键失败: {error}"),
+    error_current_exe_tpl: Cow::Borrowed("获取程序路径失败: {error}"),
+    error_write_autostart_tpl: Cow::Borrowed("写入自启动项失败: {error}"),
+    error_delete_autostart_tpl: Cow::Borrowed("删除自启动项失败: {error}"),
+    error_elevate_cancelled: Cow::Borrowed("提权启动被取消或失败"),
+    error_elevate_timeout: Cow::Borrowed("等待管理员授权超时"),
+    error_elevated_kernel_failed: Cow::Borrowed("以管理员权限启动内核失败"),
+    error_tun_ineffective: Cow::Borrowed("TUN 未生效（通常需要管理员权限）"),
+    error_kernel_needs_admin: Cow::Borrowed("内核以管理员权限运行，本程序无权停止它"),
+    error_kernel_args: Cow::Borrowed("无法读取内核自己的启动参数，未重启内核"),
+    error_message_window: Cow::Borrowed("创建消息窗口失败"),
+    error_open_web_ui_tpl: Cow::Borrowed(
+        "打开 Web 面板失败: 无法用默认浏览器打开（ShellExecute 返回 {code}）",
+    ),
+    error_open_internet_settings_tpl: Cow::Borrowed("打开 Internet Settings 失败: {error}"),
+    error_set_proxy_enable_tpl: Cow::Borrowed("设置 ProxyEnable 失败: {error}"),
+    error_set_proxy_server_tpl: Cow::Borrowed("设置 ProxyServer 失败: {error}"),
+    error_set_proxy_override_tpl: Cow::Borrowed("设置 ProxyOverride 失败: {error}"),
 
-            confirm_force_restart_tpl: Cow::Borrowed(
-                "将停止内核 {path}（PID {pid}），并按 tray.yml 重新启动这个程序自己的内核。继续吗？",
-            ),
-            error_restart_kernel_silent: Cow::Borrowed("内核重启后没有应答"),
-            error_kernel_still_running: Cow::Borrowed(
-                "内核没有停下来，没有按 tray.yml 启动新的内核",
-            ),
-            error_helper_settings: Cow::Borrowed(
-                "提权副本无法从 tray.yml 得到要启动的内核，未替换内核（只有 exe 旁的便携那份一定可见）",
-            ),
-            confirm_image_unreadable: Cow::Borrowed("（映像无法读取）"),
-        }
-    }
+    confirm_force_restart_tpl: Cow::Borrowed(
+        "将停止内核 {path}（PID {pid}），并按 tray.yml 重新启动这个程序自己的内核。继续吗？",
+    ),
+    error_restart_kernel_silent: Cow::Borrowed("内核重启后没有应答"),
+    error_kernel_still_running: Cow::Borrowed("内核没有停下来，没有按 tray.yml 启动新的内核"),
+    error_helper_settings: Cow::Borrowed(
+        "提权副本无法从 tray.yml 得到要启动的内核，未替换内核（只有 exe 旁的便携那份一定可见）",
+    ),
+    confirm_image_unreadable: Cow::Borrowed("（映像无法读取）"),
+};
 
-    /// The built-in English table. `lang/en-US.yml` ships the same strings so a
-    /// translator has a starting point; keep the two in step, the
-    /// `shipped_template_matches_the_builtin_table` test fails otherwise.
-    fn en_us() -> Self {
-        Self {
-            menu_system_proxy: Cow::Borrowed("System proxy"),
-            menu_mode: Cow::Borrowed("Proxy mode"),
-            menu_mode_rule: Cow::Borrowed("Rule"),
-            menu_mode_global: Cow::Borrowed("Global"),
-            menu_mode_direct: Cow::Borrowed("Direct"),
-            menu_tun: Cow::Borrowed("TUN mode"),
-            menu_groups: Cow::Borrowed("Proxy groups"),
-            menu_group_label_tpl: Cow::Borrowed("{name} ({kind})"),
-            menu_group_label_pinned_tpl: Cow::Borrowed("{name} ({kind} · pinned)"),
-            menu_unfix: Cow::Borrowed("Automatic (unpin)"),
-            menu_truncated: Cow::Borrowed("(too many items, omitted)"),
-            menu_empty: Cow::Borrowed("(empty)"),
-            menu_autostart: Cow::Borrowed("Start with Windows"),
-            menu_reload: Cow::Borrowed("Reload config"),
-            menu_close_connections: Cow::Borrowed("Close all connections"),
-            menu_restart_kernel: Cow::Borrowed("Restart kernel"),
-            menu_force_restart_kernel: Cow::Borrowed("Force restart kernel"),
-            menu_web_ui: Cow::Borrowed("Open web dashboard"),
-            menu_more: Cow::Borrowed("More"),
-            menu_exit: Cow::Borrowed("Exit"),
-            menu_exit_stop_kernel: Cow::Borrowed("Exit and stop Mihomo"),
-            menu_exit_only: Cow::Borrowed("Exit only"),
+/// The built-in English table. `lang/en-US.yml` ships the same strings so a
+/// translator has a starting point; keep the two in step, the
+/// `shipped_template_matches_the_builtin_table` test fails otherwise.
+static EN_US: Messages = Messages {
+    menu_system_proxy: Cow::Borrowed("System proxy"),
+    menu_mode: Cow::Borrowed("Proxy mode"),
+    menu_mode_rule: Cow::Borrowed("Rule"),
+    menu_mode_global: Cow::Borrowed("Global"),
+    menu_mode_direct: Cow::Borrowed("Direct"),
+    menu_tun: Cow::Borrowed("TUN mode"),
+    menu_groups: Cow::Borrowed("Proxy groups"),
+    menu_group_label_tpl: Cow::Borrowed("{name} ({kind})"),
+    menu_group_label_pinned_tpl: Cow::Borrowed("{name} ({kind} · pinned)"),
+    menu_unfix: Cow::Borrowed("Automatic (unpin)"),
+    menu_truncated: Cow::Borrowed("(too many items, omitted)"),
+    menu_empty: Cow::Borrowed("(empty)"),
+    menu_autostart: Cow::Borrowed("Start with Windows"),
+    menu_reload: Cow::Borrowed("Reload config"),
+    menu_close_connections: Cow::Borrowed("Close all connections"),
+    menu_restart_kernel: Cow::Borrowed("Restart kernel"),
+    menu_force_restart_kernel: Cow::Borrowed("Force restart kernel"),
+    menu_web_ui: Cow::Borrowed("Open web dashboard"),
+    menu_more: Cow::Borrowed("More"),
+    menu_exit: Cow::Borrowed("Exit"),
+    menu_exit_stop_kernel: Cow::Borrowed("Exit and stop Mihomo"),
+    menu_exit_only: Cow::Borrowed("Exit only"),
 
-            status_running_tpl: Cow::Borrowed("Mihomo status: running ({mode})"),
-            status_controller_unreachable: Cow::Borrowed(
-                "Mihomo status: kernel running, controller unreachable",
-            ),
-            status_stopped: Cow::Borrowed("Mihomo status: not running"),
-            status_looking_kernel: Cow::Borrowed("Looking for the kernel…"),
-            status_starting_kernel: Cow::Borrowed("Starting the kernel…"),
-            status_kernel_silent: Cow::Borrowed("The kernel has not answered yet; still waiting"),
-            status_restarting_kernel: Cow::Borrowed("Restarting the kernel…"),
-            status_force_restarting: Cow::Borrowed(
-                "Stopping the kernel and starting it from tray.yml…",
-            ),
-            status_elevating_kernel: Cow::Borrowed("Restarting the kernel as administrator…"),
-            status_elevating_stop: Cow::Borrowed("Stopping the kernel as administrator…"),
-            state_on: Cow::Borrowed("on"),
-            state_off: Cow::Borrowed("off"),
-            tooltip_kernel_tpl: Cow::Borrowed("Kernel: mihomo {version}"),
-            tooltip_proxy_tun_tpl: Cow::Borrowed("System proxy: {proxy} · TUN: {tun}"),
-            tooltip_port_tpl: Cow::Borrowed("Port: {port}"),
+    status_running_tpl: Cow::Borrowed("Mihomo status: running ({mode})"),
+    status_controller_unreachable: Cow::Borrowed(
+        "Mihomo status: kernel running, controller unreachable",
+    ),
+    status_stopped: Cow::Borrowed("Mihomo status: not running"),
+    status_looking_kernel: Cow::Borrowed("Looking for the kernel…"),
+    status_starting_kernel: Cow::Borrowed("Starting the kernel…"),
+    status_kernel_silent: Cow::Borrowed("The kernel has not answered yet; still waiting"),
+    status_restarting_kernel: Cow::Borrowed("Restarting the kernel…"),
+    status_force_restarting: Cow::Borrowed("Stopping the kernel and starting it from tray.yml…"),
+    status_elevating_kernel: Cow::Borrowed("Restarting the kernel as administrator…"),
+    status_elevating_stop: Cow::Borrowed("Stopping the kernel as administrator…"),
+    state_on: Cow::Borrowed("on"),
+    state_off: Cow::Borrowed("off"),
+    tooltip_kernel_tpl: Cow::Borrowed("Kernel: mihomo {version}"),
+    tooltip_proxy_tun_tpl: Cow::Borrowed("System proxy: {proxy} · TUN: {tun}"),
+    tooltip_port_tpl: Cow::Borrowed("Port: {port}"),
 
-            error_kernel_not_found: Cow::Borrowed(
-                "mihomo.exe not found; set mihomo.path in tray.yml",
-            ),
-            error_path_not_absolute_tpl: Cow::Borrowed(
-                "{field} must be an absolute path: {value} (expanded to {expanded})",
-            ),
-            error_path_missing_tpl: Cow::Borrowed(
-                "{field} points at a path that does not exist: {path}",
-            ),
-            error_flag_in_args_tpl: Cow::Borrowed(
-                "Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files",
-            ),
-            error_read_settings_tpl: Cow::Borrowed("Failed to read {path}: {error}"),
-            error_controller_unset: Cow::Borrowed("No controller is available"),
-            error_config_unreadable_tpl: Cow::Borrowed(
-                "Cannot read the kernel configuration {path}: {error}",
-            ),
-            error_controller_missing_tpl: Cow::Borrowed(
-                "The kernel does not serve external-controller ({path} has no such setting)",
-            ),
-            error_controller_other_family_tpl: Cow::Borrowed(
-                "The kernel only serves a TLS/unix/pipe controller ({path}); this program speaks http",
-            ),
-            error_controller_invalid_tpl: Cow::Borrowed(
-                "Invalid controller address: {address} (expected host:port)",
-            ),
-            error_controller_tls_tpl: Cow::Borrowed(
-                "The controller address {address} uses https: this program has no TLS client and will not fall back to a plaintext connection; use http or a tunnel of your own",
-            ),
-            error_single_instance: Cow::Borrowed(
-                "mihomo-tray is already running (the icon is in the notification area, possibly in the overflow on Windows 11)",
-            ),
-            error_window_create_tpl: Cow::Borrowed("Startup failed: {error}"),
-            error_no_kernel_path: Cow::Borrowed(
-                "No mihomo.exe path is known, cannot tell which process to stop",
-            ),
-            error_no_matching_kernel: Cow::Borrowed(
-                "No mihomo process matches this program's configuration",
-            ),
-            error_spawn_worker_tpl: Cow::Borrowed("Failed to start the polling thread: {error}"),
-            error_controller_unreachable_tpl: Cow::Borrowed(
-                "Controller {address} unreachable: {error}",
-            ),
-            error_winhttp_open: Cow::Borrowed("WinHttpOpen failed"),
-            error_request_failed: Cow::Borrowed("Request failed"),
-            error_response_too_large: Cow::Borrowed("Response too large (over 8 MiB)"),
-            error_http_request_failed: Cow::Borrowed("HTTP request failed"),
-            error_json_parse_tpl: Cow::Borrowed("JSON parse failed: {error}"),
-            error_start_process_tpl: Cow::Borrowed("Failed to start {path}: {error}"),
-            error_open_process_tpl: Cow::Borrowed("Cannot open process {pid}"),
-            error_kill_process_tpl: Cow::Borrowed("Failed to stop process {pid}"),
-            error_open_run_key_tpl: Cow::Borrowed("Failed to open the Run key: {error}"),
-            error_current_exe_tpl: Cow::Borrowed("Failed to get the program path: {error}"),
-            error_write_autostart_tpl: Cow::Borrowed(
-                "Failed to write the autostart entry: {error}",
-            ),
-            error_delete_autostart_tpl: Cow::Borrowed(
-                "Failed to delete the autostart entry: {error}",
-            ),
-            error_elevate_cancelled: Cow::Borrowed("Elevation was cancelled or failed"),
-            error_elevate_timeout: Cow::Borrowed("Timed out waiting for administrator consent"),
-            error_elevated_kernel_failed: Cow::Borrowed(
-                "Failed to start the kernel with administrator rights",
-            ),
-            error_tun_ineffective: Cow::Borrowed(
-                "TUN did not take effect (usually needs administrator rights)",
-            ),
-            error_kernel_needs_admin: Cow::Borrowed(
-                "The kernel runs with administrator rights and cannot be stopped by this program",
-            ),
-            error_kernel_args: Cow::Borrowed(
-                "Could not read the kernel's own command line, so it was not restarted",
-            ),
-            error_message_window: Cow::Borrowed("Failed to create the message window"),
-            error_restart_kernel_silent: Cow::Borrowed(
-                "The kernel did not answer after the restart",
-            ),
-            error_kernel_still_running: Cow::Borrowed(
-                "The kernel did not stop, so the one from tray.yml was not started",
-            ),
-            error_open_web_ui_tpl: Cow::Borrowed(
-                "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})",
-            ),
-            error_open_internet_settings_tpl: Cow::Borrowed(
-                "Failed to open Internet Settings: {error}",
-            ),
-            error_set_proxy_enable_tpl: Cow::Borrowed("Failed to set ProxyEnable: {error}"),
-            error_set_proxy_server_tpl: Cow::Borrowed("Failed to set ProxyServer: {error}"),
-            error_set_proxy_override_tpl: Cow::Borrowed("Failed to set ProxyOverride: {error}"),
+    error_kernel_not_found: Cow::Borrowed("mihomo.exe not found; set mihomo.path in tray.yml"),
+    error_path_not_absolute_tpl: Cow::Borrowed(
+        "{field} must be an absolute path: {value} (expanded to {expanded})",
+    ),
+    error_path_missing_tpl: Cow::Borrowed("{field} points at a path that does not exist: {path}"),
+    error_flag_in_args_tpl: Cow::Borrowed(
+        "Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files",
+    ),
+    error_read_settings_tpl: Cow::Borrowed("Failed to read {path}: {error}"),
+    error_controller_unset: Cow::Borrowed("No controller is available"),
+    error_config_unreadable_tpl: Cow::Borrowed(
+        "Cannot read the kernel configuration {path}: {error}",
+    ),
+    error_controller_missing_tpl: Cow::Borrowed(
+        "The kernel does not serve external-controller ({path} has no such setting)",
+    ),
+    error_controller_other_family_tpl: Cow::Borrowed(
+        "The kernel only serves a TLS/unix/pipe controller ({path}); this program speaks http",
+    ),
+    error_controller_invalid_tpl: Cow::Borrowed(
+        "Invalid controller address: {address} (expected host:port)",
+    ),
+    error_controller_tls_tpl: Cow::Borrowed(
+        "The controller address {address} uses https: this program has no TLS client and will not fall back to a plaintext connection; use http or a tunnel of your own",
+    ),
+    error_single_instance: Cow::Borrowed(
+        "mihomo-tray is already running (the icon is in the notification area, possibly in the overflow on Windows 11)",
+    ),
+    error_window_create_tpl: Cow::Borrowed("Startup failed: {error}"),
+    error_no_kernel_path: Cow::Borrowed(
+        "No mihomo.exe path is known, cannot tell which process to stop",
+    ),
+    error_no_matching_kernel: Cow::Borrowed(
+        "No mihomo process matches this program's configuration",
+    ),
+    error_spawn_worker_tpl: Cow::Borrowed("Failed to start the polling thread: {error}"),
+    error_controller_unreachable_tpl: Cow::Borrowed("Controller {address} unreachable: {error}"),
+    error_winhttp_open: Cow::Borrowed("WinHttpOpen failed"),
+    error_request_failed: Cow::Borrowed("Request failed"),
+    error_response_too_large: Cow::Borrowed("Response too large (over 8 MiB)"),
+    error_http_request_failed: Cow::Borrowed("HTTP request failed"),
+    error_json_parse_tpl: Cow::Borrowed("JSON parse failed: {error}"),
+    error_start_process_tpl: Cow::Borrowed("Failed to start {path}: {error}"),
+    error_open_process_tpl: Cow::Borrowed("Cannot open process {pid}"),
+    error_kill_process_tpl: Cow::Borrowed("Failed to stop process {pid}"),
+    error_open_run_key_tpl: Cow::Borrowed("Failed to open the Run key: {error}"),
+    error_current_exe_tpl: Cow::Borrowed("Failed to get the program path: {error}"),
+    error_write_autostart_tpl: Cow::Borrowed("Failed to write the autostart entry: {error}"),
+    error_delete_autostart_tpl: Cow::Borrowed("Failed to delete the autostart entry: {error}"),
+    error_elevate_cancelled: Cow::Borrowed("Elevation was cancelled or failed"),
+    error_elevate_timeout: Cow::Borrowed("Timed out waiting for administrator consent"),
+    error_elevated_kernel_failed: Cow::Borrowed(
+        "Failed to start the kernel with administrator rights",
+    ),
+    error_tun_ineffective: Cow::Borrowed(
+        "TUN did not take effect (usually needs administrator rights)",
+    ),
+    error_kernel_needs_admin: Cow::Borrowed(
+        "The kernel runs with administrator rights and cannot be stopped by this program",
+    ),
+    error_kernel_args: Cow::Borrowed(
+        "Could not read the kernel's own command line, so it was not restarted",
+    ),
+    error_message_window: Cow::Borrowed("Failed to create the message window"),
+    error_restart_kernel_silent: Cow::Borrowed("The kernel did not answer after the restart"),
+    error_kernel_still_running: Cow::Borrowed(
+        "The kernel did not stop, so the one from tray.yml was not started",
+    ),
+    error_open_web_ui_tpl: Cow::Borrowed(
+        "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})",
+    ),
+    error_open_internet_settings_tpl: Cow::Borrowed("Failed to open Internet Settings: {error}"),
+    error_set_proxy_enable_tpl: Cow::Borrowed("Failed to set ProxyEnable: {error}"),
+    error_set_proxy_server_tpl: Cow::Borrowed("Failed to set ProxyServer: {error}"),
+    error_set_proxy_override_tpl: Cow::Borrowed("Failed to set ProxyOverride: {error}"),
 
-            confirm_force_restart_tpl: Cow::Borrowed(
-                "This stops the kernel {path} (PID {pid}) and starts the one this program \
+    confirm_force_restart_tpl: Cow::Borrowed(
+        "This stops the kernel {path} (PID {pid}) and starts the one this program \
                  starts from tray.yml. Continue?",
-            ),
-            confirm_image_unreadable: Cow::Borrowed("(image cannot be read)"),
-            error_helper_settings: Cow::Borrowed(
-                "The elevated helper could not get the kernel to start from tray.yml, so the \
+    ),
+    confirm_image_unreadable: Cow::Borrowed("(image cannot be read)"),
+    error_helper_settings: Cow::Borrowed(
+        "The elevated helper could not get the kernel to start from tray.yml, so the \
                  kernel was not replaced (only the portable file next to the executable is \
                  always visible)",
-            ),
-        }
-    }
-}
+    ),
+};
 
-static MESSAGES: OnceLock<Messages> = OnceLock::new();
+static MESSAGES: OnceLock<&'static Messages> = OnceLock::new();
 static LANGUAGE: OnceLock<String> = OnceLock::new();
 
 /// The active table. Without [`init`] (unit tests) this is the built-in default,
 /// so no call site has to handle "no language chosen yet".
 pub fn t() -> &'static Messages {
-    MESSAGES.get_or_init(Messages::zh_cn)
+    MESSAGES.get_or_init(|| builtin(DEFAULT_TAG))
 }
 
 /// The primary subtag of the active UI language: `zh` or `en`, whichever table
@@ -652,38 +629,37 @@ pub fn init() {
     let _ = LANGUAGE.set(primary(&tag).to_string());
 }
 
-fn resolve(tag: &str) -> Messages {
+fn resolve(tag: &str) -> &'static Messages {
     resolve_in(&language_dir(), tag)
 }
 
 /// The testable core of [`resolve`]: the directory is a parameter so a test can
 /// point at a scratch file instead of the real `tray.yml` directory.
-fn resolve_in(dir: &Path, tag: &str) -> Messages {
+fn resolve_in(dir: &Path, tag: &str) -> &'static Messages {
     match read_language_file(dir, tag) {
         Some(translated) => {
-            let mut messages = fallback();
+            // A language file is layered on the built-in English table, not on the
+            // one `tag` names: deliberately independent of `tag`, so a missing key
+            // is missing in the same way whichever file is incomplete.
+            //
+            // The overlaid table is handed out as `&'static` like the built-in
+            // ones, which is what makes both kinds the same value to `t`; it is
+            // built once, for the life of the process.
+            let mut messages = EN_US.clone();
             messages.overlay(&|key| lookup(&translated, key));
-            messages
+            Box::leak(Box::new(messages))
         }
         None => builtin(tag),
     }
 }
 
-/// The table a language file is layered on: a translation may cover only part of
-/// the UI, and every key it leaves out comes from here rather than showing up
-/// blank. Deliberately independent of `tag`, so a key is missing in the same way
-/// whichever file is incomplete.
-fn fallback() -> Messages {
-    Messages::en_us()
-}
-
 /// The table compiled in for `tag`, matched on the primary language so `en-GB`
 /// finds the English table. Anything unrecognised falls back to the default, so
 /// an unsupported language degrades to a working UI instead of an empty one.
-fn builtin(tag: &str) -> Messages {
+fn builtin(tag: &str) -> &'static Messages {
     match primary(tag) {
-        "en" => Messages::en_us(),
-        _ => Messages::zh_cn(),
+        "en" => &EN_US,
+        _ => &ZH_CN,
     }
 }
 
@@ -813,10 +789,8 @@ mod tests {
 
     #[test]
     fn builtin_tables_agree_on_keys_and_holes() {
-        let zh_messages = Messages::zh_cn();
-        let en_messages = Messages::en_us();
-        let zh = zh_messages.entries();
-        let en = en_messages.entries();
+        let zh = ZH_CN.entries();
+        let en = EN_US.entries();
         assert_eq!(zh.len(), en.len());
         for ((key, zh_value), (en_key, en_value)) in zh.iter().zip(&en) {
             assert_eq!(key, en_key);
@@ -829,8 +803,7 @@ mod tests {
     #[test]
     fn shipped_template_matches_the_builtin_table() {
         let template = parse_language_file(include_str!("../lang/en-US.yml"));
-        let en_messages = Messages::en_us();
-        let builtin = en_messages.entries();
+        let builtin = EN_US.entries();
         assert_eq!(template.len(), builtin.len());
         for (key, value) in builtin {
             assert_eq!(lookup(&template, key).as_deref(), Some(value), "{key}");
@@ -890,7 +863,7 @@ mod tests {
 
     #[test]
     fn fill_replaces_every_hole() {
-        let messages = Messages::zh_cn();
+        let messages = &ZH_CN;
         assert_eq!(messages.tooltip_port(7890), "端口: 7890");
         assert_eq!(
             messages.menu_group_label("Auto", "URLTest"),
@@ -908,7 +881,7 @@ mod tests {
 
     #[test]
     fn a_value_that_looks_like_a_hole_is_not_filled_in() {
-        let messages = Messages::zh_cn();
+        let messages = &ZH_CN;
         // A group really can be called `{kind}`: the replacement happens once, in
         // template order, so the name reaches the label as the user wrote it
         // instead of being replaced by the value of the next argument.
@@ -955,7 +928,7 @@ mod tests {
         let parsed =
             parse_language_file("menu:\n  tun: TUN mode\n  reload:\n  groups: \"\"\nnope\n");
         assert_eq!(parsed.len(), 1);
-        let mut messages = Messages::zh_cn();
+        let mut messages = ZH_CN.clone();
         messages.overlay(&|key| lookup(&parsed, key));
         assert_eq!(messages.menu_tun, "TUN mode");
         assert_eq!(messages.menu_reload, "重载配置");
@@ -964,7 +937,7 @@ mod tests {
 
     #[test]
     fn overlay_keeps_keys_the_file_omits() {
-        let mut messages = Messages::zh_cn();
+        let mut messages = ZH_CN.clone();
         let file = parse_language_file("menu:\n  tun: TUN mode\n");
         messages.overlay(&|key| lookup(&file, key));
         assert_eq!(messages.menu_tun, "TUN mode");
