@@ -300,6 +300,20 @@ impl Client {
         self.body_of("PUT", "/configs?force=true", Some("{\"path\":\"\"}"))
             .map(|_| ())
     }
+
+    /// Ask the kernel to restart itself (`POST /restart`).
+    ///
+    /// The route answers before it acts: mihomo sends `{"status":"ok"}`, flushes,
+    /// and only then shuts the process down in a goroutine (`hub/route/restart.go`).
+    /// So a success here says "the request was accepted", never "a kernel is
+    /// running again" — the caller has to watch the controller for that.
+    ///
+    /// On Windows the process re-creates itself with its own image and argv
+    /// (`exec.Command` + `os.Exit`), so everything the old process was started
+    /// with — the administrator token included — carries over to the new one.
+    pub fn restart(&self) -> Result<(), String> {
+        self.body_of("POST", "/restart", None).map(|_| ())
+    }
 }
 
 /// `/proxies` only exposes the adapter's type name, so mihomo's `SelectAble`
@@ -605,6 +619,19 @@ mod tests {
         assert_eq!(sent.method, "PUT");
         assert_eq!(sent.path, "/configs?force=true");
         assert_eq!(sent.body, r#"{"path":""}"#);
+    }
+
+    #[test]
+    fn restart_posts_to_the_restart_route() {
+        // mihomo answers `{"status":"ok"}` with 200 before it restarts.
+        let server = spawn_server(200, "OK", r#"{"status":"ok"}"#);
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        client.restart().unwrap();
+
+        let sent = server.request();
+        assert_eq!(sent.method, "POST");
+        assert_eq!(sent.path, "/restart");
+        assert_eq!(sent.body, "");
     }
 
     #[test]

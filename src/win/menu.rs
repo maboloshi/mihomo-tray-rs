@@ -27,6 +27,8 @@ pub enum Action {
     Unfix(String),
     ToggleAutostart,
     Reload,
+    /// Restart the kernel process, keeping its own command line.
+    RestartKernel,
     /// Open the kernel's dashboard (or a hosted one pointed at it) in the
     /// browser. The tray itself has no settings window, so this is where the
     /// rest of mihomo is configured.
@@ -136,6 +138,13 @@ impl Menu {
             more_menu,
             &messages.menu_reload,
             Action::Reload,
+            false,
+            ready,
+        );
+        builder.item(
+            more_menu,
+            &messages.menu_restart_kernel,
+            Action::RestartKernel,
             false,
             ready,
         );
@@ -696,7 +705,13 @@ mod tests {
         let menu = Menu::build(&snapshot(Vec::new()), &Settings::default());
         let more = find_submenu(menu.handle, &messages.menu_more);
         assert!(!more.is_null(), "more submenu missing");
-        assert_eq!(labels(more), vec![messages.menu_reload.to_string()]);
+        assert_eq!(
+            labels(more),
+            vec![
+                messages.menu_reload.to_string(),
+                messages.menu_restart_kernel.to_string(),
+            ]
+        );
         assert!(
             !labels(menu.handle).contains(&messages.menu_reload.to_string()),
             "reload config is a submenu entry now, not a root one"

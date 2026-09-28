@@ -70,6 +70,7 @@ messages! {
     menu_empty => "menu.empty",
     menu_autostart => "menu.autostart",
     menu_reload => "menu.reload",
+    menu_restart_kernel => "menu.restart_kernel",
     menu_web_ui => "menu.web_ui",
     menu_more => "menu.more",
     menu_exit => "menu.exit",
@@ -83,6 +84,7 @@ messages! {
     status_looking_kernel => "status.looking_kernel",
     status_starting_kernel => "status.starting_kernel",
     status_kernel_silent => "status.kernel_silent",
+    status_restarting_kernel => "status.restarting_kernel",
     status_elevating_kernel => "status.elevating_kernel",
     status_elevating_stop => "status.elevating_stop",
     state_on => "state.on",
@@ -124,6 +126,7 @@ messages! {
     error_elevated_kernel_failed => "error.elevated_kernel_failed",
     error_tun_ineffective => "error.tun_ineffective",
     error_kernel_needs_admin => "error.kernel_needs_admin",
+    error_restart_kernel_silent => "error.restart_kernel_silent",
     error_kernel_args => "error.kernel_args",
     error_message_window => "error.message_window",
     error_open_web_ui_tpl => "error.open_web_ui",
@@ -321,6 +324,7 @@ impl Messages {
             menu_empty: Cow::Borrowed("(空)"),
             menu_autostart: Cow::Borrowed("开机自启动"),
             menu_reload: Cow::Borrowed("重载配置"),
+            menu_restart_kernel: Cow::Borrowed("重启内核"),
             menu_web_ui: Cow::Borrowed("打开 Web 面板"),
             menu_more: Cow::Borrowed("更多"),
             menu_exit: Cow::Borrowed("退出"),
@@ -333,6 +337,7 @@ impl Messages {
             status_looking_kernel: Cow::Borrowed("正在查找内核…"),
             status_starting_kernel: Cow::Borrowed("正在启动内核…"),
             status_kernel_silent: Cow::Borrowed("内核尚未应答，仍在等待"),
+            status_restarting_kernel: Cow::Borrowed("正在重启内核…"),
             status_elevating_kernel: Cow::Borrowed("正在以管理员身份重启内核…"),
             status_elevating_stop: Cow::Borrowed("正在以管理员权限停止内核…"),
             state_on: Cow::Borrowed("开"),
@@ -394,6 +399,7 @@ impl Messages {
             error_set_proxy_enable_tpl: Cow::Borrowed("设置 ProxyEnable 失败: {error}"),
             error_set_proxy_server_tpl: Cow::Borrowed("设置 ProxyServer 失败: {error}"),
             error_set_proxy_override_tpl: Cow::Borrowed("设置 ProxyOverride 失败: {error}"),
+            error_restart_kernel_silent: Cow::Borrowed("内核重启后没有应答"),
         }
     }
 
@@ -416,6 +422,7 @@ impl Messages {
             menu_empty: Cow::Borrowed("(empty)"),
             menu_autostart: Cow::Borrowed("Start with Windows"),
             menu_reload: Cow::Borrowed("Reload config"),
+            menu_restart_kernel: Cow::Borrowed("Restart kernel"),
             menu_web_ui: Cow::Borrowed("Open web dashboard"),
             menu_more: Cow::Borrowed("More"),
             menu_exit: Cow::Borrowed("Exit"),
@@ -430,6 +437,7 @@ impl Messages {
             status_looking_kernel: Cow::Borrowed("Looking for the kernel…"),
             status_starting_kernel: Cow::Borrowed("Starting the kernel…"),
             status_kernel_silent: Cow::Borrowed("The kernel has not answered yet; still waiting"),
+            status_restarting_kernel: Cow::Borrowed("Restarting the kernel…"),
             status_elevating_kernel: Cow::Borrowed("Restarting the kernel as administrator…"),
             status_elevating_stop: Cow::Borrowed("Stopping the kernel as administrator…"),
             state_on: Cow::Borrowed("on"),
@@ -506,6 +514,9 @@ impl Messages {
                 "Could not read the kernel's own command line, so it was not restarted",
             ),
             error_message_window: Cow::Borrowed("Failed to create the message window"),
+            error_restart_kernel_silent: Cow::Borrowed(
+                "The kernel did not answer after the restart",
+            ),
             error_open_web_ui_tpl: Cow::Borrowed(
                 "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})",
             ),

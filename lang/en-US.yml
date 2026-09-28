@@ -31,6 +31,7 @@ menu:
   empty: (empty)
   autostart: Start with Windows
   reload: Reload config
+  restart_kernel: Restart kernel
   web_ui: Open web dashboard
   more: More
   exit: Exit
@@ -44,6 +45,7 @@ status:
   looking_kernel: "Looking for the kernel…"
   starting_kernel: "Starting the kernel…"
   kernel_silent: "The kernel has not answered yet; still waiting"
+  restarting_kernel: "Restarting the kernel…"
   elevating_kernel: "Restarting the kernel as administrator…"
   elevating_stop: "Stopping the kernel as administrator…"
 
@@ -89,6 +91,7 @@ error:
   elevated_kernel_failed: Failed to start the kernel with administrator rights
   tun_ineffective: TUN did not take effect (usually needs administrator rights)
   kernel_needs_admin: "The kernel runs with administrator rights and cannot be stopped by this program"
+  restart_kernel_silent: "The kernel did not answer after the restart"
   kernel_args: "Could not read the kernel's own command line, so it was not restarted"
   message_window: Failed to create the message window
   open_web_ui: "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})"

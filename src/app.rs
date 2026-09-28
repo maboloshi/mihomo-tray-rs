@@ -29,6 +29,8 @@ pub enum Command {
     },
     Unfix(String),
     Reload,
+    /// Ask the kernel to restart itself through its own API.
+    RestartKernel,
     /// Ask for the rights to stop a kernel that is not ours to end.
     StopKernelElevated,
     /// Re-read everything (used after actions handled on the UI thread).
@@ -136,6 +138,7 @@ impl App {
             }),
             Action::Unfix(group) => self.send(Command::Unfix(group.clone())),
             Action::Reload => self.send(Command::Reload),
+            Action::RestartKernel => self.send(Command::RestartKernel),
             Action::OpenWebUi => {
                 // The entry is only clickable while the controller answers, and
                 // the refresh that proves that is the one that published this
@@ -257,10 +260,16 @@ struct Worker<'a> {
     /// the controller has to be resolved again from the one running afterwards.
     /// A borrow of what startup found would pin the session to the first kernel.
     client: Option<Client>,
+    /// The settings the worker was started with: resolving the controller again
+    /// after a restart is a settings question, not a state one.
+    settings: &'a Settings,
     state: &'a Shared,
     hwnd: isize,
     /// The kernel this program may start or replace.
     kernel: &'a KernelSlot,
+    /// The kernel version, read once per client: a restarted kernel may be a new
+    /// image, so the cache is dropped whenever the client is replaced.
+    version: String,
 }
 
 /// What bringing the kernel up left behind for the poll loop.
@@ -366,11 +375,13 @@ fn spawn_worker(
         .stack_size(256 * 1024)
         .spawn(move || {
             let startup = startup(&kernel, &settings, &state, hwnd);
-            let worker = Worker {
+            let mut worker = Worker {
                 client: startup.client,
+                settings: &settings,
                 state: &state,
                 hwnd,
                 kernel: &kernel,
+                version: String::new(),
             };
             // The kernel's own failure is the more specific one, so it wins over
             // a settings file that could not be read.
@@ -399,7 +410,6 @@ fn spawn_worker(
                     waiting_for_kernel = true;
                 }
             }
-            let mut version = String::new();
             loop {
                 // Refresh first so the very first menu the user opens already has
                 // real data, then wait either for a command or the poll interval.
@@ -407,7 +417,7 @@ fn spawn_worker(
                     worker.client.as_ref(),
                     &settings.web_url,
                     &state,
-                    &mut version,
+                    &mut worker.version,
                     outcome.take(),
                 );
                 post(hwnd, win::WM_REFRESH);
@@ -421,7 +431,7 @@ fn spawn_worker(
                     }
                 }
                 match rx.recv_timeout(poll) {
-                    Ok(command) => outcome = Some(execute(&worker, &command)),
+                    Ok(command) => outcome = Some(execute(&mut worker, &command)),
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
@@ -431,7 +441,12 @@ fn spawn_worker(
         .map_err(|error| i18n::t().error_spawn_worker(&error.to_string()))
 }
 
-fn execute(worker: &Worker, command: &Command) -> Option<String> {
+fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
+    // A restart replaces the client itself, so it cannot run behind a borrow of
+    // the client it replaces.
+    if matches!(command, Command::RestartKernel) {
+        return restart_kernel(worker);
+    }
     let Some(client) = worker.client.as_ref() else {
         // Without a controller the two process commands are still worth carrying
         // out; everything else can only answer that there is nothing to talk to.
@@ -450,8 +465,70 @@ fn execute(worker: &Worker, command: &Command) -> Option<String> {
         Command::Reload => client.reload(),
         Command::StopKernelElevated => return stop_kernel_elevated(worker),
         Command::Refresh => Ok(()),
+        // Handled before this point, so that the client can be replaced while it
+        // happens.
+        Command::RestartKernel => Ok(()),
     };
     result.err()
+}
+
+/// Restart the kernel through its own API (`POST /restart`).
+///
+/// The acknowledgement is not the restart: mihomo answers `{"status":"ok"}` and
+/// shuts the old process down afterwards, so everything past the request is about
+/// finding out whether a kernel is really there again. The replacement process is
+/// created from the old one's image and argv, which is why this path keeps an
+/// elevated kernel elevated and needs no administrator rights of its own.
+///
+/// What it cannot do is make the settings known: the replacement is created from
+/// the old process's own command line, so a kernel somebody else started keeps
+/// running the way they started it.
+fn restart_kernel(worker: &mut Worker) -> Option<String> {
+    let Some(client) = worker.client.as_ref() else {
+        return Some(i18n::t().error_controller_unset.to_string());
+    };
+    show_note(
+        worker.state,
+        worker.hwnd,
+        Some(i18n::t().status_restarting_kernel.to_string()),
+    );
+    if let Err(error) = client.restart() {
+        show_note(worker.state, worker.hwnd, None);
+        return Some(error);
+    }
+    // Everything recorded about the old process describes a kernel that is on its
+    // way out. The handle is dropped, which does not kill anything; the PID would
+    // otherwise be read as "our kernel is still running" by the exit path, which
+    // asks for administrator rights and then finds nothing to stop.
+    forget_kernel_process(worker);
+    // The kernel this program is talking to answered the request, so the address is
+    // valid — but it may have been changed by the configuration the restart picked
+    // up, and resolving it again is what notices. A resolution that fails keeps the
+    // client that works, rather than turning a restart that succeeded into "no
+    // controller". The answer is looked for on the client that is current now.
+    if let Ok(client) = discover::find_controller(worker.settings) {
+        worker.client = Some(client);
+    }
+    let answered = wait_for_controller(worker.client.as_ref());
+    show_note(worker.state, worker.hwnd, None);
+    // A restart may be how a new binary is picked up.
+    worker.version.clear();
+    if answered {
+        None
+    } else {
+        Some(i18n::t().error_restart_kernel_silent.to_string())
+    }
+}
+
+/// Forget the process behind the kernel, because it is not the kernel any more.
+///
+/// Used after a restart and after a replacement: both leave a recorded PID and a
+/// child handle pointing at a process that is gone, and a recorded PID that
+/// outlives its process is what makes the exit path demand administrator rights
+/// for nothing. Dropping the handle does not end the process it refers to.
+fn forget_kernel_process(worker: &Worker) {
+    state::write_kernel_pid(worker.state, None);
+    let _ = state::take_kernel_child(worker.kernel);
 }
 
 /// Turn TUN on or off.
@@ -781,6 +858,85 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// A controller that stays up: it acknowledges `POST /restart` the way mihomo
+    /// does and answers every later probe with a body [`Client::alive`] accepts.
+    ///
+    /// The single-shot server in `mihomo::api` cannot play this part — the restart
+    /// flow asks the controller more than once and has to see it come back.
+    fn spawn_controller() -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake controller");
+        let port = listener
+            .local_addr()
+            .expect("fake controller address")
+            .port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                // Read the request head (neither route sends a body), then answer.
+                let mut head = Vec::new();
+                let mut chunk = [0u8; 256];
+                while let Ok(read) = stream.read(&mut chunk) {
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&chunk[..read]);
+                    if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let payload = r#"{"status":"ok","version":"mihomo v1.19.31"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("127.0.0.1:{port}")
+    }
+
+    #[test]
+    fn restarting_the_kernel_drops_the_old_process_and_replaces_the_client() {
+        let address = spawn_controller();
+        // The controller is what the client talks to, so it has to resolve from the
+        // settings; a kernel is not needed for the restart request itself.
+        let settings = Settings {
+            controller_address: address.clone(),
+            ..Settings::default()
+        };
+        let state = state::shared();
+        let kernel = state::kernel_slot();
+        state::write_kernel_pid(&state, Some(4321));
+        let child = std::process::Command::new("cmd")
+            .args(["/c", "exit"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("start a stand-in for the kernel process");
+        state::write_kernel_child(&kernel, child);
+        let mut worker = Worker {
+            client: Some(Client::new(&address, "", 2000).expect("client")),
+            settings: &settings,
+            state: &state,
+            hwnd: 0,
+            kernel: &kernel,
+            version: "mihomo v1.19.30 (old image)".to_string(),
+        };
+
+        assert_eq!(restart_kernel(&mut worker), None);
+
+        // The restarted kernel is a new process: the PID and the handle describe one
+        // that is gone, and keeping the PID is what makes the exit path ask for
+        // administrator rights for nothing.
+        assert_eq!(state::read(&state).kernel_pid, None);
+        assert!(state::take_kernel_child(&kernel).is_none());
+        // A different image may be running now, and the version is read once.
+        assert!(worker.version.is_empty());
+        assert!(worker.client.is_some(), "the controller stays usable");
+    }
 
     #[test]
     fn the_icon_shows_the_strongest_state() {
