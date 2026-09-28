@@ -57,6 +57,9 @@ tooltip:
 
 error:
   kernel_not_found: "mihomo.exe not found; set mihomo.path in tray.yml"
+  path_not_absolute: "{field} must be an absolute path: {value} (expanded to {expanded})"
+  path_missing: "{field} points at a path that does not exist: {path}"
+  flag_in_args: "Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files"
   read_settings: "Failed to read {path}: {error}"
   window_create: "Startup failed: {error}"
   no_kernel_path: "No mihomo.exe path is known, cannot tell which process to stop"

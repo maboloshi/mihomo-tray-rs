@@ -289,9 +289,14 @@ fn startup(kernel: &KernelSlot, settings: &Settings, state: &Shared, hwnd: isize
     startup
 }
 
-/// The search itself, and the decision to start the kernel this program owns.
+/// The startup itself, and the decision to start the kernel this program owns.
 fn look_for_kernel(kernel: &KernelSlot, settings: &Settings) -> Startup {
+    // A path that is declared but unusable is a configuration problem, and it is
+    // reported as one: "not configured" and "configured wrongly" are different
+    // answers, and neither is a search for whatever binary is around.
     let path = discover::find_kernel(settings);
+    let path_error = path.as_ref().err().cloned();
+    let path = path.unwrap_or(None);
     // Recorded before anything runs: "exit and stop mihomo" matches the kernel it
     // may stop against this path, including one this program did not start.
     state::write_kernel_path(kernel, path.clone());
@@ -302,8 +307,11 @@ fn look_for_kernel(kernel: &KernelSlot, settings: &Settings) -> Startup {
     let mut startup = Startup {
         client,
         started_kernel: false,
-        error: None,
+        error: path_error,
     };
+    if startup.error.is_some() {
+        return startup;
+    }
     if startup.client.alive() || !settings.mihomo_auto_start {
         return startup;
     }
@@ -316,7 +324,14 @@ fn look_for_kernel(kernel: &KernelSlot, settings: &Settings) -> Startup {
     if !proc::list_mihomo().is_empty() {
         return startup;
     }
-    match proc::start(&path, &discover::launch_args(settings)) {
+    let args = match discover::launch_args(settings) {
+        Ok(args) => args,
+        Err(error) => {
+            startup.error = Some(error);
+            return startup;
+        }
+    };
+    match proc::start(&path, &args) {
         Ok(child) => {
             state::write_kernel_child(kernel, child);
             startup.started_kernel = true;

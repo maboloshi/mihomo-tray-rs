@@ -5,6 +5,7 @@ mod i18n;
 mod icon;
 mod instance;
 mod mihomo;
+mod paths;
 mod settings;
 mod state;
 mod win;

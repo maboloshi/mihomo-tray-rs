@@ -17,6 +17,10 @@ pub enum DarkMenu {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub mihomo_path: String,
+    /// mihomo's `-d`: the directory its configuration, cache and geodata live in.
+    /// Empty means the kernel's own default, which mihomo documents as
+    /// `%USERPROFILE%\.config\mihomo`.
+    pub mihomo_home: String,
     pub mihomo_args: Vec<String>,
     pub mihomo_config: String,
     pub mihomo_auto_start: bool,
@@ -40,6 +44,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             mihomo_path: String::new(),
+            mihomo_home: String::new(),
             mihomo_args: Vec::new(),
             mihomo_config: String::new(),
             mihomo_auto_start: true,
@@ -158,6 +163,7 @@ fn parse(text: &str) -> Settings {
         }
         match (section.as_str(), key) {
             ("mihomo", "path") => s.mihomo_path = unquote(value),
+            ("mihomo", "home") => s.mihomo_home = unquote(value),
             ("mihomo", "args") => s.mihomo_args = parse_list(value),
             ("mihomo", "config") => s.mihomo_config = unquote(value),
             ("mihomo", "auto_start") => s.mihomo_auto_start = parse_bool(value, true),
@@ -339,7 +345,8 @@ controller:
   secret: \"tok#en\"
 mihomo:
   path: \"D:\\App\\Scoop\\shims\\mihomo.exe\"
-  args: ['-d', \"C:\\Users\\沙漠之子\\.config\\mihomo\"]
+  home: \"%USERPROFILE%\\.config\\mihomo\"
+  args: ['-m', '-ext-ui=C:\\ui']
 proxy:
   bypass: [\"*.local\", 'example.com']
 groups:
@@ -352,10 +359,8 @@ ui:
         assert_eq!(s.controller_address, "127.0.0.1:9098");
         assert_eq!(s.controller_secret, "tok#en");
         assert_eq!(s.mihomo_path, r"D:\App\Scoop\shims\mihomo.exe");
-        assert_eq!(
-            s.mihomo_args,
-            vec!["-d", r"C:\Users\沙漠之子\.config\mihomo"]
-        );
+        assert_eq!(s.mihomo_home, r"%USERPROFILE%\.config\mihomo");
+        assert_eq!(s.mihomo_args, vec!["-m", r"-ext-ui=C:\ui"]);
         assert_eq!(s.proxy_bypass, vec!["*.local", "example.com"]);
         assert_eq!(s.groups_page_size, 50);
         assert_eq!(s.dark_menu, DarkMenu::Always);

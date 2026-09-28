@@ -92,6 +92,9 @@ messages! {
 
     // Errors. These reach the menu, the tooltip and the startup message box.
     error_kernel_not_found => "error.kernel_not_found",
+    error_path_not_absolute_tpl => "error.path_not_absolute",
+    error_path_missing_tpl => "error.path_missing",
+    error_flag_in_args_tpl => "error.flag_in_args",
     error_read_settings_tpl => "error.read_settings",
     error_window_create_tpl => "error.window_create",
     error_no_kernel_path => "error.no_kernel_path",
@@ -173,6 +176,33 @@ impl Messages {
         self.fill(
             &self.error_read_settings_tpl,
             &[("path", path), ("error", error)],
+        )
+    }
+
+    /// A path in `tray.yml` that is not absolute. Both the value as written and
+    /// the expanded one are shown, because with `%NAME%` in the value they differ
+    /// and that difference is usually the whole answer.
+    pub fn error_path_not_absolute(&self, field: &str, value: &str, expanded: &str) -> String {
+        self.fill(
+            &self.error_path_not_absolute_tpl,
+            &[("field", field), ("value", value), ("expanded", expanded)],
+        )
+    }
+
+    pub fn error_path_missing(&self, field: &str, path: &str) -> String {
+        self.fill(
+            &self.error_path_missing_tpl,
+            &[("field", field), ("path", path)],
+        )
+    }
+
+    /// A kernel argument that restates a setting this program owns. Two spellings
+    /// of one setting is how the kernel and this program end up reading different
+    /// files, so it is refused rather than resolved.
+    pub fn error_flag_in_args(&self, flag: &str, field: &str) -> String {
+        self.fill(
+            &self.error_flag_in_args_tpl,
+            &[("flag", flag), ("field", field)],
         )
     }
 
@@ -288,6 +318,13 @@ impl Messages {
             error_kernel_not_found: Cow::Borrowed(
                 "未找到 mihomo.exe，请在 tray.yml 中设置 mihomo.path",
             ),
+            error_path_not_absolute_tpl: Cow::Borrowed(
+                "{field} 必须是绝对路径: {value}（%VAR% 展开后为 {expanded}）",
+            ),
+            error_path_missing_tpl: Cow::Borrowed("{field} 指向的路径不存在: {path}"),
+            error_flag_in_args_tpl: Cow::Borrowed(
+                "mihomo.args 里不要写 {flag}，请用 {field}；同一设置写两处，内核和本程序会读到不同的文件",
+            ),
             error_read_settings_tpl: Cow::Borrowed("读取 {path} 失败: {error}"),
             error_window_create_tpl: Cow::Borrowed("启动失败: {error}"),
             error_no_kernel_path: Cow::Borrowed("未找到 mihomo.exe 路径，无法确认要停止的进程"),
@@ -365,6 +402,15 @@ impl Messages {
 
             error_kernel_not_found: Cow::Borrowed(
                 "mihomo.exe not found; set mihomo.path in tray.yml",
+            ),
+            error_path_not_absolute_tpl: Cow::Borrowed(
+                "{field} must be an absolute path: {value} (expanded to {expanded})",
+            ),
+            error_path_missing_tpl: Cow::Borrowed(
+                "{field} points at a path that does not exist: {path}",
+            ),
+            error_flag_in_args_tpl: Cow::Borrowed(
+                "Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files",
             ),
             error_read_settings_tpl: Cow::Borrowed("Failed to read {path}: {error}"),
             error_window_create_tpl: Cow::Borrowed("Startup failed: {error}"),

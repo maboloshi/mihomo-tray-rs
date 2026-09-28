@@ -1,15 +1,17 @@
-//! Locating the kernel executable and the external controller.
+//! Where the kernel is, where its configuration is, and what that configuration
+//! says about the external controller.
 //!
-//! Three different things have three different sources, so they are resolved
-//! separately: the `mihomo.exe` path, the configuration file, and the controller
-//! address. Nothing here assumes the config file is where the running core reads
-//! it from — probing is the last resort precisely because the address is often
-//! injected through `-ext-ctl` or an environment variable.
+//! Nothing here searches. The kernel binary is what `mihomo.path` names, the
+//! configuration file is what `mihomo.config` or `mihomo.home` names (or mihomo's
+//! own default when neither does), and the controller is what that file says.
+//! Guessing is what once made this program talk to a kernel it was not looking
+//! at, so a declaration that is missing or unusable is reported instead.
 
 use std::path::{Path, PathBuf};
 
 use super::api::Client;
-use super::proc;
+use crate::i18n;
+use crate::paths;
 use crate::settings::Settings;
 
 const DEFAULT_PORTS: [u16; 5] = [9090, 9091, 9097, 9098, 6170];
@@ -17,144 +19,109 @@ const DEFAULT_PORTS: [u16; 5] = [9090, 9091, 9097, 9098, 6170];
 /// The name mihomo looks for under `-d` when it is not told a file.
 const CONFIG_FILE_NAME: &str = "config.yaml";
 
-fn exe_dir() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()?
-        .parent()
-        .map(Path::to_path_buf)
-}
-
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").map(PathBuf::from)
 }
 
-/// Candidate `mihomo.exe` locations, highest priority first.
-pub fn kernel_candidates(settings: &Settings) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    if !settings.mihomo_path.is_empty() {
-        out.push(PathBuf::from(&settings.mihomo_path));
+/// mihomo's own configuration directory, mirrored exactly: `%USERPROFILE%\.config
+/// \mihomo`, and `XDG_CONFIG_HOME` instead only when that directory does not
+/// exist — mihomo tests the same condition, so the two agree on a machine that
+/// sets the variable.
+fn default_home() -> Option<PathBuf> {
+    let home = home_dir()?.join(".config").join("mihomo");
+    if home.exists() {
+        return Some(home);
     }
-    if let Some(running) = proc::list_mihomo()
-        .into_iter()
-        .find(|p| !p.path.as_os_str().is_empty() && !proc::is_shim(&p.path))
-        .map(|p| p.path)
-    {
-        out.push(running);
+    match std::env::var("XDG_CONFIG_HOME") {
+        Ok(xdg) if !xdg.is_empty() => Some(PathBuf::from(xdg).join("mihomo")),
+        _ => Some(home),
     }
-    if let Some(dir) = exe_dir() {
-        out.push(dir.join("mihomo.exe"));
-        out.push(dir.join("bin").join("mihomo.exe"));
-        out.push(dir.join("core").join("mihomo.exe"));
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        for entry in std::env::split_paths(&path) {
-            out.push(entry.join("mihomo.exe"));
-        }
-    }
-    if let Some(scoop) = std::env::var_os("SCOOP") {
-        let root = PathBuf::from(scoop);
-        out.push(root.join("shims").join("mihomo.exe"));
-        if let Ok(apps) = std::fs::read_dir(root.join("apps")) {
-            for app in apps.flatten() {
-                if app
-                    .file_name()
-                    .to_string_lossy()
-                    .to_ascii_lowercase()
-                    .starts_with("mihomo")
-                {
-                    out.push(app.path().join("current").join("mihomo.exe"));
-                }
-            }
-        }
-    }
-    if let Some(home) = home_dir() {
-        out.push(home.join("scoop").join("shims").join("mihomo.exe"));
-    }
-    out
 }
 
-pub fn find_kernel(settings: &Settings) -> Option<PathBuf> {
-    let candidates: Vec<PathBuf> = kernel_candidates(settings)
-        .into_iter()
-        .filter(|p| p.is_file())
-        .collect();
-    // A scoop shim is a launcher, not the kernel: stopping it does not stop the
-    // kernel it started, so a real binary is always preferred when one exists.
-    candidates
-        .iter()
-        .find(|path| !proc::is_shim(path))
-        .cloned()
-        .or_else(|| candidates.into_iter().next())
+/// The kernel to start: what `mihomo.path` names.
+///
+/// `Ok(None)` is "not configured" — an empty setting, which the caller reports as
+/// such — while an error is a path that is configured and unusable. Both are
+/// answered rather than guessed at: a search would start whichever `mihomo.exe`
+/// it happened to find first.
+pub fn find_kernel(settings: &Settings) -> Result<Option<PathBuf>, String> {
+    if settings.mihomo_path.trim().is_empty() {
+        return Ok(None);
+    }
+    paths::file("mihomo.path", &settings.mihomo_path).map(Some)
 }
 
-/// Candidate configuration files, used only to read `external-controller`.
-pub fn config_candidates(settings: &Settings) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    if !settings.mihomo_config.is_empty() {
-        out.push(PathBuf::from(&settings.mihomo_config));
+/// The configuration file `mihomo.config` declares, if it declares one.
+fn declared_config(settings: &Settings) -> Result<Option<PathBuf>, String> {
+    if settings.mihomo_config.trim().is_empty() {
+        return Ok(None);
     }
-    let file_name = std::env::var("CLASH_CONFIG_FILE").unwrap_or_else(|_| CONFIG_FILE_NAME.into());
-    if let Ok(dir) = std::env::var("CLASH_HOME_DIR") {
-        out.push(PathBuf::from(dir).join(&file_name));
-    }
-    if let Some(home) = home_dir() {
-        out.push(home.join(".config").join("mihomo").join(&file_name));
-    }
-    if let Some(dir) = exe_dir() {
-        out.push(dir.join(CONFIG_FILE_NAME));
-    }
-    out
+    paths::absolute("mihomo.config", &settings.mihomo_config).map(Some)
 }
 
-/// The kernel's command line: the configured arguments, plus where its
+/// The kernel's configuration directory: `mihomo.home`, else the directory of the
+/// file `mihomo.config` names, else mihomo's own default.
+///
+/// `Ok(None)` means "not determinable" (`%USERPROFILE%` is not set), which leaves
+/// the kernel to its own default rather than inventing one.
+fn kernel_home(settings: &Settings) -> Result<Option<PathBuf>, String> {
+    if !settings.mihomo_home.trim().is_empty() {
+        return paths::absolute("mihomo.home", &settings.mihomo_home).map(Some);
+    }
+    if let Some(config) = declared_config(settings)? {
+        return Ok(config.parent().map(Path::to_path_buf));
+    }
+    Ok(default_home())
+}
+
+/// The kernel's configuration file: `mihomo.config`, else `config.yaml` under
+/// [`kernel_home`] — the rule mihomo itself applies to an empty `-f`.
+fn kernel_config(settings: &Settings) -> Result<Option<PathBuf>, String> {
+    match declared_config(settings)? {
+        Some(config) => Ok(Some(config)),
+        None => Ok(kernel_home(settings)?.map(|home| home.join(CONFIG_FILE_NAME))),
+    }
+}
+
+/// The kernel's command line: what `tray.yml` declares, plus where its
 /// configuration lives.
 ///
-/// This is only for the kernel this program starts itself; a running kernel is
-/// restarted from its own command line, which is the only source that is right by
-/// construction. Two things are added, each only while the arguments do not name
-/// it themselves:
+/// `-d` and `-f` are always built from the resolved absolute paths, because
+/// mihomo resolves a relative one against the kernel's own working directory —
+/// which for a kernel this program starts is inherited from the tray rather than
+/// chosen by anyone. Pinning `-d` also matters for a kernel that ends up running
+/// under another account (the elevated TUN replacement), where mihomo's own
+/// default directory would be that account's rather than the one read here.
 ///
-/// * `-d <dir>` — mihomo's directory for the configuration, its cache and its
-///   geodata. It matters because an elevated kernel may run under another account,
-///   where `%USERPROFILE%` — and with it mihomo's own default directory — is not
-///   the one the tray just read.
-/// * `-f <file>` — a file that is not called `config.yaml` has to be named, and
-///   the kernel would otherwise read another one than the tray did. That covers
-///   `mihomo.config` as well as a `CLASH_CONFIG_FILE` name found under
-///   `CLASH_HOME_DIR` or `~/.config/mihomo`.
-pub fn launch_args(settings: &Settings) -> Vec<String> {
-    let explicit = (!settings.mihomo_config.is_empty())
-        .then(|| PathBuf::from(&settings.mihomo_config))
-        .filter(|path| path.is_file());
-    let file = explicit.clone().or_else(|| {
-        config_candidates(settings)
-            .into_iter()
-            .find(|p| p.is_file())
-    });
-    let mut args = settings.mihomo_args.clone();
-    let Some(file) = file else {
-        return args;
-    };
-    if !names_flag(&args, "d") {
-        if let Some(dir) = file.parent() {
-            args.push("-d".to_string());
-            args.push(dir.display().to_string());
+/// Everything else in `mihomo.args` is passed through as written, with `%NAME%`
+/// expanded the way cmd would. An argument that restates one of the settings
+/// owned by `tray.yml` is refused: the kernel would obey the argument while this
+/// program read the setting, and the two would disagree without saying so.
+pub fn launch_args(settings: &Settings) -> Result<Vec<String>, String> {
+    for (flag, field) in [
+        ("d", "mihomo.home"),
+        ("f", "mihomo.config"),
+        ("ext-ctl", "controller.address"),
+        ("secret", "controller.secret"),
+    ] {
+        if names_flag(&settings.mihomo_args, flag) {
+            return Err(i18n::t().error_flag_in_args(&format!("-{flag}"), field));
         }
     }
-    if needs_config_file(&file, explicit.is_some()) && !names_flag(&args, "f") {
-        args.push("-f".to_string());
-        args.push(file.display().to_string());
+    let mut args: Vec<String> = settings
+        .mihomo_args
+        .iter()
+        .map(|arg| paths::expand(arg))
+        .collect();
+    if let Some(home) = kernel_home(settings)? {
+        args.push("-d".to_string());
+        args.push(home.display().to_string());
     }
-    args
-}
-
-/// Whether the kernel has to be told which file to read: one named `config.yaml`
-/// is what it looks for under `-d` anyway, anything else is not.
-fn needs_config_file(file: &Path, explicit: bool) -> bool {
-    explicit
-        || !file
-            .file_name()
-            .is_some_and(|name| name.eq_ignore_ascii_case(CONFIG_FILE_NAME))
+    if let Some(config) = kernel_config(settings)? {
+        args.push("-f".to_string());
+        args.push(config.display().to_string());
+    }
+    Ok(args)
 }
 
 /// Whether the arguments already carry a Go-style flag: `-d`, `--d`, `-d=…`,
@@ -218,17 +185,18 @@ pub fn find_controller(settings: &Settings) -> Option<Client> {
         }
     }
 
+    // The one configuration file `tray.yml` declares, or mihomo's own default: the
+    // only file this program reads a controller address from.
     let mut from_file: Vec<(String, String)> = Vec::new();
-    for path in config_candidates(settings) {
-        if !path.is_file() {
-            continue;
-        }
-        let (address, secret) = controller_from_config(&path);
-        if let Some(address) = address {
-            from_file.push((
-                address,
-                secret.or_else(|| env_secret.clone()).unwrap_or_default(),
-            ));
+    if let Ok(Some(path)) = kernel_config(settings) {
+        if path.is_file() {
+            let (address, secret) = controller_from_config(&path);
+            if let Some(address) = address {
+                from_file.push((
+                    address,
+                    secret.or_else(|| env_secret.clone()).unwrap_or_default(),
+                ));
+            }
         }
     }
     for (address, secret) in &from_file {
@@ -322,25 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn a_non_default_config_name_is_named_to_the_kernel() {
-        // The kernel looks for `config.yaml` under `-d` on its own, so any other
-        // name — explicit or found through `CLASH_CONFIG_FILE` — has to be given.
-        assert!(needs_config_file(
-            Path::new(r"C:\mihomo\custom.yaml"),
-            false
-        ));
-        assert!(needs_config_file(Path::new(r"C:\mihomo\config.yaml"), true));
-        assert!(!needs_config_file(
-            Path::new(r"C:\mihomo\config.yaml"),
-            false
-        ));
-        assert!(!needs_config_file(
-            Path::new(r"C:\mihomo\CONFIG.YAML"),
-            false
-        ));
-    }
-
-    #[test]
     fn explicit_setting_wins() {
         let settings = Settings {
             controller_address: "127.0.0.1:1234".into(),
@@ -360,18 +309,39 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_config_file_is_named_with_its_directory() {
+    fn the_kernel_is_the_declared_one_and_nothing_else() {
+        // Nothing declared is "not configured", not a search.
+        assert!(find_kernel(&Settings::default()).unwrap().is_none());
+
+        // A declared path that is not there is reported, not skipped: skipping is
+        // what made a tray look like it could not find a kernel it was told about.
+        let settings = Settings {
+            mihomo_path: r"Z:\definitely\missing\mihomo.exe".into(),
+            ..Settings::default()
+        };
+        let error = find_kernel(&settings).unwrap_err();
+        assert!(error.contains("mihomo.path"), "{error}");
+
+        // A relative path is refused before anything is opened.
+        let settings = Settings {
+            mihomo_path: r"scoop\apps\mihomo.exe".into(),
+            ..Settings::default()
+        };
+        assert!(find_kernel(&settings).unwrap_err().contains("mihomo.path"));
+    }
+
+    #[test]
+    fn a_declared_config_file_is_named_with_its_directory() {
         let (dir, file) = scratch("custom.yaml");
         let settings = Settings {
             mihomo_config: file.display().to_string(),
-            mihomo_args: vec!["-ext-ctl".to_string(), "127.0.0.1:9999".to_string()],
+            mihomo_args: vec!["-m".to_string()],
             ..Settings::default()
         };
         assert_eq!(
-            launch_args(&settings),
+            launch_args(&settings).unwrap(),
             vec![
-                "-ext-ctl".to_string(),
-                "127.0.0.1:9999".to_string(),
+                "-m".to_string(),
                 "-d".to_string(),
                 dir.display().to_string(),
                 "-f".to_string(),
@@ -382,23 +352,53 @@ mod tests {
     }
 
     #[test]
-    fn arguments_that_already_name_the_location_are_left_alone() {
-        let (_, file) = scratch("already.yaml");
-        for named in [
-            vec!["-d", r"C:\elsewhere"],
-            vec!["--d", r"C:\elsewhere"],
-            vec!["-d=C:\\elsewhere"],
-            vec!["--d=C:\\elsewhere"],
+    fn a_declared_home_is_used_as_it_stands() {
+        let (dir, file) = scratch("config.yaml");
+        let settings = Settings {
+            mihomo_home: dir.display().to_string(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            launch_args(&settings).unwrap(),
+            vec![
+                "-d".to_string(),
+                dir.display().to_string(),
+                "-f".to_string(),
+                file.display().to_string(),
+            ]
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn arguments_may_not_restate_a_setting_we_own() {
+        // Two spellings of one setting is how the kernel and this program end up
+        // reading different files, so the argument is refused by name.
+        let (_, file) = scratch("owned.yaml");
+        for (flag, field) in [
+            ("-d", "mihomo.home"),
+            ("--d=X", "mihomo.home"),
+            ("-f", "mihomo.config"),
+            ("-f=Y", "mihomo.config"),
+            ("-ext-ctl", "controller.address"),
+            ("-secret", "controller.secret"),
         ] {
-            let mut args: Vec<String> = named.iter().map(|arg| arg.to_string()).collect();
-            args.extend(["-f".to_string(), r"C:\elsewhere\config.yaml".to_string()]);
             let settings = Settings {
                 mihomo_config: file.display().to_string(),
-                mihomo_args: args.clone(),
+                mihomo_args: vec![flag.to_string()],
                 ..Settings::default()
             };
-            assert_eq!(launch_args(&settings), args, "for {named:?}");
+            let error = launch_args(&settings).unwrap_err();
+            // The report names the field to use instead, which is the useful half.
+            assert!(error.contains(field), "{flag}: {error}");
         }
+        // An argument that belongs to the kernel alone is passed through.
+        let settings = Settings {
+            mihomo_config: file.display().to_string(),
+            mihomo_args: vec!["-ext-ui=C:\\ui".to_string()],
+            ..Settings::default()
+        };
+        assert_eq!(launch_args(&settings).unwrap()[0], "-ext-ui=C:\\ui");
         let _ = std::fs::remove_file(&file);
     }
 }
