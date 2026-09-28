@@ -1,6 +1,6 @@
 # 重启内核（设计与实现记录）
 
-> 本功能已实现：`feat/restart-kernel` 分支上的四个主题提交（client 改 owned → 「更多」子菜单 → `重启内核` → `强制重启`（含提权副本模式））。§5 的待定项已按其中的「拍板记录」落地；§7 的真机部分仍需人工过一遍。
+> 本功能已实现并落在 `main` 上（`feat/restart-kernel`，六个主题提交：client 改 owned → 「更多」子菜单 → `重启内核` → `强制重启`（含提权副本模式）→ 文档）。§5 的待定项已按其中的「拍板记录」落地；§7 的真机部分仍需人工过一遍。
 
 ## 1. 三个动作，别混在一起
 
@@ -104,7 +104,7 @@
 ## 8. 本次落地信息（给下一次会话）
 
 - 起点：`main` @ `68dbf20`（文档里原来的 `9e98c14` 已过期）。
-- 分支：`feat/restart-kernel`，worktree `.worktrees/restart-kernel`；四个主题提交：client 改 owned → 「更多」子菜单 → `重启内核` → `强制重启`（本地路径）→ 提权替换副本（外加一个文档提交）。
+- 落地：**已在 `main` 上**（`--ff-only`，主线 tip `4fe2dc7`，分支 `feat/restart-kernel` 与 worktree `.worktrees/restart-kernel` 已清理）。六个提交：client 改 owned → 「更多」子菜单 → `重启内核` → `强制重启`（本地路径）→ 提权替换副本 → 文档。
 - 提交前必过：三件套 + 本仓库 `rust-deterministic-gate` 的本地闭环（fmt/clippy 输出不回传）。
-- 收尾：rebase 到主线最新 tip 后 `merge --ff-only`（本仓库主线要求线性历史，后落地者负责 rebase）。
+- 下一轮若继续改这块：从**当前主线 tip** 开新 worktree（不要复用已删除的分支名）；本仓库主线要求线性历史，`merge --ff-only`，后落地者负责 rebase。
 - 必读：`src/app.rs`（worker / `Command` / `refresh` / `stop_kernel` / `restart_kernel` / `force_restart_kernel`）、`src/mihomo/api.rs`、`src/mihomo/discover.rs`、`src/mihomo/proc.rs`、`docs/DESIGN.md` §3/§5/§8、`docs/ROADMAP.md`（硬约束 9 是提权路径的红线）。
