@@ -19,18 +19,32 @@
 - 源码：`hub/route/restart.go`（`r.Post("/", restart)`），挂载见 `hub/route/server.go`：在**鉴权组内**，`embedMode` 下不挂载。
 - 行为：先 `render.JSON({"status":"ok"})` + `Flush`，然后在 goroutine 里 `executor.Shutdown()`；**Windows 是 `exec.Command(execPath, os.Args[1:]...)` 后 `os.Exit(0)`**（不是 exec-replace），Unix 才是 `syscall.Exec`。
 - 因此新进程完整继承 **argv / 环境 / 令牌 / 工作目录** ⇒ **提权保持、环境不丢**，提权路径既不需要 UAC 也不需要我们的 helper。
-- 本机实测（v1.19.31，一次性内核，控制器 `127.0.0.1:9096` + secret）：
+- 本机实测（v1.19.31；两次都用一次性内核 + 独立端口，跑完即清理，没碰你自己的内核）：
 
   ```
-  POST /restart      → 200 {"status":"ok"}   429 ms
-  控制器重新应答      → 445 ms
-  新 PID 是旧 PID 的子进程；旧进程随后退出
-  日志：Mihomo shutting down → restarting: "<exe>" ["-d" "<同一目录>"] → RESTful API listening at 127.0.0.1:9096
+  第一次（控制器 9096，secret 写在配置文件里）
+    POST /restart            → 200 {"status":"ok"}   429 ms   ← 冷启动的首个请求
+    控制器重新应答            → 445 ms
+    新 PID 是旧 PID 的子进程；旧进程随后退出
+
+  第二次（控制器 9097；secret 只放在 CLASH_OVERRIDE_SECRET 里，配置文件不写；额外带一个 -m）
+    PUT /configs?force=true  → 204，PID 不变（这就是 reload 与 restart 的分界）
+    POST /restart            → 200 {"status":"ok"}   60 ms
+    控制器重新应答            → 76 ms
+    新命令行                  = 旧命令行（"-d <dir> -m" 原样）
+    无 auth 访问              → 重启后仍 401 ⇒ 环境变量确实随重启保留
+    连发 5 次                 → 回包 6/5/7 ms（第 1、5 次 684/509 ms）
+                                恢复 13/10/13 ms（同两次 707/515 ms）
+    9097 的监听进程            → 始终只有 1 个；日志里 6 次全部 "RESTful API listening at: 127.0.0.1:9097"，
+                                没有 listen error / bind 失败
   ```
+
+- **恢复时间不是固定值**：快的时候 ~10 ms，慢的时候 0.5–0.7 s（冷启动、系统繁忙时）。所以「响应 ≠ 已起来」按"可能"写，托盘必须等待 + 状态注记，不能假设一个固定窗口。
+- **未实测**：提权内核重启后是否仍提权。机制上必然（Windows 子进程继承父进程的令牌，Go 的 `exec.Command` 也不改令牌），但要先有提权内核 + 一次 UAC 同意才能测，本轮没做——留给真机验收（§7 第②项）。
 
 - **它不解决"设置不可知"**：重启后还是原来那份 argv/env，「别的启动器配的内核」不会变成我们的。归一要靠强制重启。
 
-### 2.2 托盘侧现状（文档落笔时 `main` @ `9e98c14`）
+### 2.2 改动前的托盘侧现状（起点 `main` @ `9e98c14`）
 
 - `Worker.client: Option<&Client>` 是**整个会话不可替换的借用**（`src/app.rs`）；`discover::find_controller` 只在启动时跑一次。
 - `discover::launch_args`：展开 args → 拒绝 `-d/-f/-ext-ctl/-secret` → **总是**传绝对 `-d/-f` → 把 `CLASH_OVERRIDE_*` 具体化成 `-ext-ctl/-secret`。
@@ -87,8 +101,8 @@
 ## 6. 已知坑
 
 - `POST /restart` 后旧 `Child` 指向已退出进程；记录的 PID 会误导退出路径（见 §3.4）。
-- 响应先于重启返回；控制器有约 0.4 s 的不可用窗口，别把它当失败。
-- Windows 上"子进程在父进程 `os.Exit` 之前 bind"的理论竞争：本轮实测控制器端口**没有**复现（445 ms 恢复，日志显示绑定成功）；要压测再下结论。
+- 响应先于重启返回，所以 **200 不代表内核已起来**；实测恢复时间 10 ms ～ 0.7 s 不等（连发 5 次里 3 次 ~10 ms、2 次 ~0.5–0.7 s），托盘必须等待（`wait_for_controller`），不要假设固定窗口。
+- Windows 上"子进程在父进程 `os.Exit` 之前 bind"的理论竞争：**6 次重启（含 5 次连发）都未复现**——控制器端口每次都重新绑定成功、日志无 `listen error`，同一时刻只有一个监听进程。仍属"没证明不存在"，异常时先看内核日志。
 - `embedMode` 下没有 `/restart` 路由（CLI 内核不受影响）。
 - 与别的启动器（clash-verge 等）打架：强制重启后对方可能再把它的内核拉起来。
 - 无控制器时无法重启（菜单项灰显），此时唯一手段是强制重启。
