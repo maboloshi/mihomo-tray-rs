@@ -32,6 +32,7 @@ menu:
   autostart: Start with Windows
   reload: Reload config
   web_ui: Open web dashboard
+  more: More
   exit: Exit
   exit_stop_kernel: Exit and stop Mihomo
   exit_only: Exit only

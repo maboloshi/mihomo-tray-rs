@@ -82,7 +82,9 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
               自动（取消固定）                     ← 仅在该组已固定时出现
 ─────────────────────────────
 ✔ 开机自启动
-重载配置
+打开 Web 面板
+更多 ▶
+   重载配置
 ─────────────────────────────
 退出 ▶
    退出并停止 Mihomo
@@ -91,7 +93,7 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
 
 实现要点：
 
-- **命令 id 表**：每次构建菜单生成 `Vec<(u32, Target)>`，id 从 1000 递增（0 保留），`Target` 是 `Mode(..)` / `Tun` / `Group{group, member}` / `Reload` / `Exit(stop_kernel)`；菜单销毁即清空，不做文本反查。
+- **命令 id 表**：每次构建菜单生成 `Vec<Action>`，id 从 100 递增（0 保留，由表内顺序推导），`Action` 是 `SetMode(..)` / `ToggleTun` / `Select{group, member}` / `Unfix` / `Reload` / `OpenWebUi` / `Exit*` 等；菜单销毁即清空，不做文本反查。子菜单项共用同一张表，因此插入一个菜单项会让其后所有 id 位移（点击时按当次构建的 id 回查，不存在跨次构建的稳定性要求）。
 - **单选**：`MF_CHECKED | MFT_RADIOCHECK`。
 - **可切换组**：判据不是「`type` 是不是 `Selector`」而是「适配器是否实现 mihomo 的 `outboundgroup.SelectAble`」（`hub/route/proxies.go` 的 `updateProxy` 同此）。该集合恰好是 `Selector`/`URLTest`/`Fallback` 三种，`LoadBalance`/`Relay` 与普通节点会返回 `400 Must be a Selector`。非 `Selector` 的可切换组（自动组）项文本为 `名称 (类型)`，点击成员即 `PUT /proxies/{name}` 固定该节点；`/proxies` 的 `fixed` 非空时标签追加 `· 已固定`，并在成员列表顶部提供「自动（取消固定）」（`DELETE /proxies/{name}`）。
 - **只读组**（`LoadBalance` 等）：整组不可点，项文本为 `名称 (类型)`。

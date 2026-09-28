@@ -124,10 +124,22 @@ impl Menu {
             snapshot.autostart,
             true,
         );
-        builder.item(root, &messages.menu_reload, Action::Reload, false, ready);
         // The URL points at the controller (or at a panel told about it), so
         // this entry follows the controller like every other action here.
         builder.item(root, &messages.menu_web_ui, Action::OpenWebUi, false, ready);
+
+        // The one-off commands that act on the kernel process live one level down:
+        // they are what a user reaches for when something is wrong, not part of the
+        // switches the menu is opened for every day.
+        let more_menu = builder.new_menu();
+        builder.item(
+            more_menu,
+            &messages.menu_reload,
+            Action::Reload,
+            false,
+            ready,
+        );
+        builder.popup(root, &messages.menu_more, more_menu, ready, false);
 
         builder.separator(root);
         let exit_menu = builder.new_menu();
@@ -492,6 +504,13 @@ mod tests {
         std::ptr::null_mut()
     }
 
+    /// Position of a submenu item, which is how its own state (grayed, checked) is
+    /// read: a popup carries no command id.
+    fn submenu_position(menu: HMENU, name: &str) -> Option<i32> {
+        let count = unsafe { GetMenuItemCount(menu) };
+        (0..count).find(|position| label_at(menu, *position) == name)
+    }
+
     /// Total number of entries in the whole menu tree.
     fn count_items(menu: HMENU) -> usize {
         let count = unsafe { GetMenuItemCount(menu) };
@@ -669,6 +688,28 @@ mod tests {
             0,
             "without a controller the entry is grayed out"
         );
+    }
+
+    #[test]
+    fn the_kernel_commands_live_in_the_more_submenu() {
+        let messages = i18n::t();
+        let menu = Menu::build(&snapshot(Vec::new()), &Settings::default());
+        let more = find_submenu(menu.handle, &messages.menu_more);
+        assert!(!more.is_null(), "more submenu missing");
+        assert_eq!(labels(more), vec![messages.menu_reload.to_string()]);
+        assert!(
+            !labels(menu.handle).contains(&messages.menu_reload.to_string()),
+            "reload config is a submenu entry now, not a root one"
+        );
+
+        // Reloading needs a controller, so without one the submenu is out of reach
+        // as a whole.
+        let mut offline = snapshot(Vec::new());
+        offline.controller_ok = false;
+        let offline = Menu::build(&offline, &Settings::default());
+        let position = submenu_position(offline.handle, &messages.menu_more).expect("more submenu");
+        let state = unsafe { GetMenuState(offline.handle, position as u32, MF_BYPOSITION) };
+        assert_ne!(state & MF_GRAYED, 0, "no controller, nothing to reload");
     }
 
     #[test]
