@@ -81,7 +81,7 @@ Phase 1（MVP）已实现并真机验证：
 
 1. **工具链**：`edition = "2024"`、`rust-version = "1.85"`，不启用任何 nightly 特性。`unsafe fn` 内必须显式 `unsafe` 块（edition 2024 的 `unsafe_op_in_unsafe_fn`）。
 2. **不加运行时依赖**：现仅 `windows-sys` / `serde_json` / `winreg`，构建期零依赖（清单走 linker 参数）。
-3. **产物语言**：代码、注释、commit 英文；文档中文；界面文案一律走 `src/i18n.rs` 的语言表（默认 `zh-CN`、内置 `en-US`），禁止在业务代码里硬编码；新增或修改文案要同步 `lang/en-US.yml`。
+3. **产物语言**：代码、注释、commit 英文；文档中文；界面文案一律走 `src/i18n.rs` 的语言表（默认 `zh-CN`、内置 `en-US`），禁止在业务代码里硬编码；新增或修改文案只改 `src/i18n.rs` 的内置英文表，`lang/en-US.yml` 由 `build.rs` 自动重写，不需要手工同步。
 4. **收尾三件套必须全绿**：`cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release`。
 5. **线程模型不得破坏**：UI 线程只做 Win32 与注册表操作；所有 HTTP 在 worker 线程；`muda`/`HMENU` 这类菜单对象只能在创建它的线程使用。
 6. **停止内核不要用 `taskkill /IM`**：只结束自己启动或路径匹配的进程。

@@ -78,7 +78,7 @@
 - `src/win/mod.rs`：`confirm()`（Yes/No，默认「否」；在 worker 线程上弹，与 UAC 一样不占用 UI 线程）。
 - `src/mihomo/proc.rs` + `src/main.rs` + `src/win/elevate.rs`：`--kernel-replace-elevated <pid> <参数…>` 副本（映像自己从 PID 读，参数收托盘的）、`kernel_replace_params()`、`proc::quoted_args()`（`ShellExecuteExW` 只能收一个字符串，所以参数的边界要靠引用往返）。
 - `src/win/menu.rs`：「更多」子菜单（`重载配置` / `重启内核` / `强制重启内核`）；子菜单在"有控制器**或**有内核在跑"时可展开，项级灰显各按自己的条件。
-- `src/i18n.rs` + `lang/en-US.yml`：菜单项、状态注记、失败文案、确认框（**四处同步**：`messages!` 列表、zh/en 表、语言文件；带占位符的模板配一个 `impl Messages` 里的渲染方法，单测盯着键与占位符一一对应）。
+- `src/i18n.rs`：菜单项、状态注记、失败文案、确认框（改文案在 `messages!` 列表与 zh/en 两张表里加一行；带占位符的模板配一个 `impl Messages` 里的渲染方法，单测盯着键与占位符一一对应；`lang/en-US.yml` 由 `build.rs` 从 `EN_US` 表自动重写，不用手工同步）。
 - `README.md`（特性/已知行为）、`docs/DESIGN.md`（§3、§5、§8）、本文档。
 - 测试（+3，共 71 个）：`api.rs` 用本地假控制器断言 `POST /restart` 的 method/path；`app.rs` 用一个**常驻**假控制器跑完整重启流程（清 PID/句柄、替换 client、清 version —— `api.rs` 那个单发假服务器演不了这个）；`menu.rs` 断言「更多」的内容与两档灰显。
 

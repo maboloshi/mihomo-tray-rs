@@ -1,9 +1,10 @@
 # mihomo-tray language file: English (United States).
 #
-# The interface follows the Windows UI language, and that language's tag is the
-# file name: `lang/ja-JP.yml` is used when Windows runs in Japanese. Copy this
-# file, rename it to your system's tag and translate the values on the right.
-# To see the tag, run in PowerShell:
+# Copy this file, rename it to your system's tag and translate the values on the
+# right; that copy is the one the program reads, this file is only a template and
+# is regenerated on every build. The interface follows the Windows UI language,
+# and that language's tag is the file name: `lang/ja-JP.yml` is used when
+# Windows runs in Japanese. To see the tag, run in PowerShell:
 #
 #     (Get-UICulture).Name
 #
@@ -15,6 +16,8 @@
 # {name}, {kind}, {mode}, {port}, {pid}, {path}, {address}, {error}, {version},
 # {proxy} and {tun} are filled in at run time: keep them spelled exactly as they
 # are here.
+#
+# Everything below this line is written by build.rs from the built-in English table in src/i18n.rs: change a string there, not here.
 
 menu:
   system_proxy: System proxy
@@ -24,8 +27,8 @@ menu:
   mode_direct: Direct
   tun: TUN mode
   groups: Proxy groups
-  group_label: "{name} ({kind})"
-  group_label_pinned: "{name} ({kind} · pinned)"
+  group_label: {name} ({kind})
+  group_label_pinned: {name} ({kind} · pinned)
   unfix: Automatic (unpin)
   truncated: (too many items, omitted)
   empty: (empty)
@@ -44,18 +47,18 @@ status:
   running: "Mihomo status: running ({mode})"
   controller_unreachable: "Mihomo status: kernel running, controller unreachable"
   stopped: "Mihomo status: not running"
-  looking_kernel: "Looking for the kernel…"
+  looking_kernel: Looking for the kernel…
   kernel_discovered: "Kernel discovered: {path}"
-  starting_kernel: "Starting the kernel…"
-  kernel_silent: "The kernel has not answered yet; still waiting"
-  restarting_kernel: "Restarting the kernel…"
-  force_restarting: "Stopping the kernel and starting it from tray.yml…"
-  elevating_kernel: "Restarting the kernel as administrator…"
-  elevating_stop: "Stopping the kernel as administrator…"
+  starting_kernel: Starting the kernel…
+  kernel_silent: The kernel has not answered yet; still waiting
+  restarting_kernel: Restarting the kernel…
+  force_restarting: Stopping the kernel and starting it from tray.yml…
+  elevating_kernel: Restarting the kernel as administrator…
+  elevating_stop: Stopping the kernel as administrator…
 
 state:
-  on: "on"
-  off: "off"
+  on: on
+  off: off
 
 tooltip:
   kernel: "Kernel: mihomo {version}"
@@ -66,18 +69,18 @@ error:
   kernel_not_found: "No mihomo.exe found: not beside this program, not on PATH, not in scoop; set mihomo.path in tray.yml"
   path_not_absolute: "{field} must be an absolute path: {value} (expanded to {expanded})"
   path_missing: "{field} points at a path that does not exist: {path}"
-  flag_in_args: "Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files"
-  read_settings: "Failed to read {path}: {error}"
+  flag_in_args: Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files
   controller_unset: No controller is available
   config_unreadable: "Cannot read the kernel configuration {path}: {error}"
-  controller_missing: "The kernel does not serve external-controller ({path} has no such setting)"
-  controller_other_family: "The kernel only serves a TLS/unix/pipe controller ({path}); this program speaks http"
+  controller_missing: The kernel does not serve external-controller ({path} has no such setting)
+  controller_other_family: The kernel only serves a TLS/unix/pipe controller ({path}); this program speaks http
   controller_invalid: "Invalid controller address: {address} (expected host:port)"
   controller_tls: "The controller address {address} uses https: this program has no TLS client and will not fall back to a plaintext connection; use http or a tunnel of your own"
-  single_instance: "mihomo-tray is already running (the icon is in the notification area, possibly in the overflow on Windows 11)"
+  single_instance: mihomo-tray is already running (the icon is in the notification area, possibly in the overflow on Windows 11)
+  read_settings: "Failed to read {path}: {error}"
   window_create: "Startup failed: {error}"
-  no_kernel_path: "No mihomo.exe path is known, cannot tell which process to stop"
-  no_matching_kernel: "No mihomo process matches this program's configuration"
+  no_kernel_path: No mihomo.exe path is known, cannot tell which process to stop
+  no_matching_kernel: No mihomo process matches this program's configuration
   spawn_worker: "Failed to start the polling thread: {error}"
   controller_unreachable: "Controller {address} unreachable: {error}"
   winhttp_open: WinHttpOpen failed
@@ -96,17 +99,19 @@ error:
   elevate_timeout: Timed out waiting for administrator consent
   elevated_kernel_failed: Failed to start the kernel with administrator rights
   tun_ineffective: TUN did not take effect (usually needs administrator rights)
-  kernel_needs_admin: "The kernel runs with administrator rights and cannot be stopped by this program"
-  restart_kernel_silent: "The kernel did not answer after the restart"
-  kernel_still_running: "The kernel did not stop, so the one from tray.yml was not started"
-  kernel_args: "Could not read the kernel's own command line, so it was not restarted"
+  kernel_needs_admin: The kernel runs with administrator rights and cannot be stopped by this program
+  restart_kernel_silent: The kernel did not answer after the restart
+  kernel_still_running: The kernel did not stop, so the one from tray.yml was not started
+
+confirm:
+  force_restart: This stops the kernel {path} (PID {pid}) and starts the one this program starts from tray.yml. Continue?
+  image_unreadable: (image cannot be read)
+
+error:
+  kernel_args: Could not read the kernel's own command line, so it was not restarted
   message_window: Failed to create the message window
   open_web_ui: "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})"
   open_internet_settings: "Failed to open Internet Settings: {error}"
   set_proxy_enable: "Failed to set ProxyEnable: {error}"
   set_proxy_server: "Failed to set ProxyServer: {error}"
   set_proxy_override: "Failed to set ProxyOverride: {error}"
-
-confirm:
-  force_restart: "This stops the kernel {path} (PID {pid}) and starts the one this program starts from tray.yml. Continue?"
-  image_unreadable: "(image cannot be read)"

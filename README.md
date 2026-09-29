@@ -91,6 +91,8 @@ ui:
 2. 文件名用**系统语言的 BCP-47 标签**，例如 `ja-JP.yml`、`ko-KR.yml`、`de-DE.yml`——程序按这个标签找文件，所以名字必须和系统语言一致；
 3. 内容照抄仓库里的 [`lang/en-US.yml`](lang/en-US.yml)（自带注释，也是模板），把右侧的值换成译文。
 
+那份 `lang/en-US.yml` 本身就是**生成物**：`build.rs` 每次构建都按 `src/i18n.rs` 里的内置英文表重写标记行以下的部分（标记行以上是手写的说明，不动），改动文案只需要改 `src/i18n.rs`，不用手工同步语言文件；自己写的译文文件（`lang/ja-JP.yml` 等）不受影响。
+
 查自己的系统标签（PowerShell）：
 
 ```powershell

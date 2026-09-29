@@ -299,8 +299,9 @@ ui:
 3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`（`Icons::new` 与 `TaskbarCreated` 重注册时各量一次，主显示器 DPI 变化后重画而不是沿用旧尺寸），无资源文件、无图像库。
 4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
 5. **实测体积/内存**：exe 329.0 KB（336,896 B；2026-09 体积复查后的数字，复查前 389.0 KB / 398,336 B，见本节「二进制体积复查」），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
-6. **单测 89 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"）、并断言托盘给提权副本的那条命令行经 `CommandLineToArgvW` 往返后逐字不变（含尾反斜杠与空参数），图标层断言当前尺寸与 `SM_CXSMICON` 一致；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言内核候选链的顺序与"真 binary 优先于 shim"、配置候选的顺序（捆绑根 → 内核同目录 → mihomo 默认）与存在性挑选、控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
+6. **单测 89 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"）、并断言托盘给提权副本的那条命令行经 `CommandLineToArgvW` 往返后逐字不变（含尾反斜杠与空参数），图标层断言当前尺寸与 `SM_CXSMICON` 一致；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板就是 `build.rs` 的生成物（比对构建脚本盖进二进制的指纹，手改生成段即失败）且逐条等于内置英文表、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言内核候选链的顺序与"真 binary 优先于 shim"、配置候选的顺序（捆绑根 → 内核同目录 → mihomo 默认）与存在性挑选、控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
 7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（62 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
+   **模板由构建脚本生成**：`lang/en-US.yml` 的标记行以下部分是 `build.rs` 从 `src/i18n.rs` 重写出来的——键取自 `messages!` 列表（只有那里拼键名），值取自内置 `EN_US` 表，生成文本的 FNV-1a 指纹经 `cargo:rustc-env` 交给单测，手改生成段或改文案没重建都会让单测失败。标记行以上是手写说明，构建脚本原样保留。于是「新增或修改文案」只剩改 `src/i18n.rs` 一处，不再需要手工同步语言文件。
    **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB，当时的数字），远高于动工前估的 3–4 KB——语言表本体、62 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（62 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
 
 ### 二进制体积复查（2026-09）
@@ -315,7 +316,7 @@ ui:
 
 结果：exe 398,336 B → **336,896 B（−60.0 KiB，−15.4%）**，`.text` 291.0 → 239.5 KiB。仍高于 §2 的 250 KB 预算（那条是 Phase 0 的选型预算）。
 
-复查顺带记下、**本轮未处理**的几项，都属于便宜且独立的小改动：`Cargo.toml` 开了 `Win32_Security` 而源码零引用；`Cargo.lock` 里 `serde`/`serde_derive`/`syn`/`quote`/`proc-macro2`/`unicode-ident` 不在解析图内（`cargo tree` 只有 `serde_json → itoa/memchr/serde_core/zmij`）；`lang/en-US.yml` 与内置英文表逐条相同、靠测试强同步；`win/{mod,elevate,menu,shell}.rs` 各带一份 `wide()`；`std::env::var`（18 处）会把 `to_lowercase`（3.9 KiB）链进来，换 `GetEnvironmentVariableW` 可去掉。另有一项既有失败：`cargo test`（debug）下 `icon.rs:109` 的 `color * 3` u8 溢出使图标那项失败，`--release` 全绿——与本次改动无关，主树同样失败。
+复查顺带记下、**本轮未处理**的几项，都属于便宜且独立的小改动：`Cargo.toml` 开了 `Win32_Security` 而源码零引用；`Cargo.lock` 里 `serde`/`serde_derive`/`syn`/`quote`/`proc-macro2`/`unicode-ident` 不在解析图内（`cargo tree` 只有 `serde_json → itoa/memchr/serde_core/zmij`）；`win/{mod,elevate,menu,shell}.rs` 各带一份 `wide()`；`std::env::var`（18 处）会把 `to_lowercase`（3.9 KiB）链进来，换 `GetEnvironmentVariableW` 可去掉。另有一项既有失败：`cargo test`（debug）下 `icon.rs:109` 的 `color * 3` u8 溢出使图标那项失败，`--release` 全绿——与本次改动无关，主树同样失败。（`lang/en-US.yml` 曾在列表里，现已由 `build.rs` 生成，见本节 §7。）
 
 ### 代码审查修复（第二轮，10 项 must-fix + 若干 should-fix）
 
