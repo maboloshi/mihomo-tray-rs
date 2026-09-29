@@ -17,7 +17,9 @@ pub enum DarkMenu {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// The kernel to start. Empty means "find it": the discovery chain looks beside
-    /// this executable, then on `PATH`, then in scoop (`discover::find_kernel`).
+    /// this executable, then along `PATH` — where a scoop shim is followed to the
+    /// binary it launches (`discover::find_kernel`). A kernel that is not called
+    /// `mihomo.exe` has to be named here: nothing searches for another name.
     pub mihomo_path: String,
     /// mihomo's `-d`: the directory its configuration, cache and geodata live in.
     /// Empty means the directory of the configuration file the kernel brings along

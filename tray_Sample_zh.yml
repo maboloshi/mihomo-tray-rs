@@ -8,9 +8,11 @@
 # 选择过的。
 
 mihomo:
-  path: ""             # 要启动的 mihomo.exe；留空 = 自发现：先找本程序同目录
-                       # （含 bin\、core\），再找 PATH，最后找 Scoop。填写时必须是
-                       # 绝对路径，例如 %USERPROFILE%\scoop\apps\mihomo\current\mihomo.exe
+  path: ""             # 要启动的内核；留空 = 自发现：先找本程序同目录（含 bin\、core\），
+                       # 再按 PATH 顺序找（只找 mihomo.exe 这个名字；命中 Scoop 的
+                       # shims\mihomo.exe 时会按同目录 mihomo.shim 里的 path = 换成真内核）。
+                       # 内核改了名就必须写在这里，且必须是绝对路径，例如
+                       # %USERPROFILE%\scoop\apps\mihomo\current\mihomo.exe
   home: ""             # mihomo 的 -d（配置目录）；
                        # 留空 = 用内核带来的那份配置所在目录，都没有才用内核默认目录
                        # （%USERPROFILE%\.config\mihomo）

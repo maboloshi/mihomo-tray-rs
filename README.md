@@ -25,7 +25,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 ## 环境要求
 
 - Windows 10/11 (x64)
-- [mihomo](https://github.com/MetaCubeX/mihomo) 已安装；本程序会**自发现**它（同目录 → `PATH` → Scoop），也可以照旧在 `tray.yml` 里写明 `mihomo.path`
+- [mihomo](https://github.com/MetaCubeX/mihomo) 已安装；本程序会**自发现**它（同目录 → `PATH`），也可以照旧在 `tray.yml` 里写明 `mihomo.path`
 - 构建需要 Rust stable（`edition 2024`，MSRV 1.85），无需额外工具链
 
 ## 构建
@@ -107,7 +107,7 @@ ui:
 
 | 目标 | 来源 |
 |---|---|
-| `mihomo.exe` | `tray.yml mihomo.path`（填了就只认它，填错直接报错，不会退回去搜索）；留空则自发现：本程序同目录（含 `bin\`、`core\`）→ `PATH` → Scoop（`apps\mihomo*\current`、`shims`、`~/scoop/shims`）。命中多个时优先真 binary，而不是同名启动器 shim |
+| `mihomo.exe` | `tray.yml mihomo.path`（填了就只认它，填错直接报错，不会退回去搜索）；留空则自发现：本程序同目录（含 `bin\`、`core\`）→ `PATH` 各目录（`PATH` 顺序即优先级）。**只找 `mihomo.exe` 这个名字**——内核改了名就在 `mihomo.path` 里写它。命中 `shims\mihomo.exe` 这类 Scoop 启动器时，读同目录 `mihomo.shim` 里的 `path = …`（**只读这一项**）换成真内核，身份判定与停止内核于是都落在真内核上 |
 | 配置目录 | `mihomo.home` → `mihomo.config` 所在目录 → 内核带来的那份配置所在目录 → 内核默认 `%USERPROFILE%\.config\mihomo`（`XDG_CONFIG_HOME` 仅在该目录不存在时参与，与 mihomo 的判定一致） |
 | 配置文件 | `mihomo.config` → `<配置目录>\config.yaml`；`home`/`config` 都留空时先看内核带来的那份——内核在**本程序目录树**里（同目录或 `bin\`/`core\`）时先看本程序所在目录的 `config.yaml`，再看内核同目录的 `config.yaml`，都没有才落到 mihomo 默认目录 |
 | 内核命令行 | 运行中那个内核自己的 argv：`-f`/`-d` 说明它读的是哪份文件，`-ext-ctl`/`-secret` 非空时**覆盖**配置文件（这就是 mihomo 自己的优先级）。同用户的内核可读；提权内核读不到，就跳过这一来源 |
@@ -123,7 +123,7 @@ ui:
 
 - **重载配置不需要知道 yml 路径**：`PUT /configs?force=true` 且 `path` 为空时，内核回落到自己启动时的配置文件；`force=true` 才会重建 inbound 监听器。
 - **TUN 失败不会返回 HTTP 错误**（内核只记日志并把 `enable` 置 false），因此本程序以回读 `GET /configs` 的结果为准：回读仍是 `false` 时，用 `ShellExecuteExW("runas")` 启动自身的一个隐藏副本（`--kernel-start-elevated <pid>`），由它停掉旧内核、并按**那个内核自己的命令行**重新启动，然后重试。取消 UAC 没有任何副作用——终止旧内核发生在提权之后。
-- **提权副本自己从 PID 读映像，启动参数则由托盘给出**：映像路径由副本从那个进程读出来（`NtQueryInformationProcess`，提权之后连托盘读不到的提权内核也能读），所以副本永远不会"以管理员身份运行任意程序"——它只接受映像名为 `mihomo.exe` 的进程。启动参数（`--kernel-replace-elevated <pid> <参数…>`）来自托盘，因为托盘的 `tray.yml` 是唯一的配置来源，而提权副本以另一个账户运行时未必看得见它；换成副本自己读，反而会出现"两边读到不同配置"。退出码 = 新内核 PID 为正，失败为负（`-2` 参数/不是内核、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行）；不走文件/管道回传，因为"由调用者指定路径"就等于给低权限进程一个让管理员写文件的口子。
+- **提权副本自己从 PID 读映像，启动参数则由托盘给出**：映像路径由副本从那个进程读出来（`NtQueryInformationProcess`，提权之后连托盘读不到的提权内核也能读），所以副本永远不会"以管理员身份运行任意程序"——它只能启动那个 PID 自己的映像。**不看映像名**：内核可以改名，`mihomo.path` 想指谁就指谁（名字检查本来也拦不住谁：调用方能给自己的文件起名 `mihomo.exe`）。启动参数（`--kernel-replace-elevated <pid> <参数…>`）来自托盘，因为托盘的 `tray.yml` 是唯一的配置来源，而提权副本以另一个账户运行时未必看得见它；换成副本自己读，反而会出现"两边读到不同配置"。退出码 = 新内核 PID 为正，失败为负（`-2` 参数/PID 无效、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行）；不走文件/管道回传，因为"由调用者指定路径"就等于给低权限进程一个让管理员写文件的口子。
 - **内核身份按「记录的 PID → 路径身份」判定**：提权后托盘读不到那个进程的映像路径，所以后续操作以副本回传的 PID 为准；没有记录时才比路径，而且比较必须**归一化**（`canonicalize` + 忽略大小写）——scoop 的 `apps\<app>\current\mihomo.exe` 是 junction，进程报告的是解析后的 `apps\<app>\<版本>\mihomo.exe`，直接比字符串永远不相等（这正是"提权后内核停不掉"的根因）。
 - **本程序自己启动内核时总是显式传 `-d <配置目录> -f <配置文件>`**（都由 `tray.yml` 解析成绝对路径），所以内核读的就是这里读的那一份；提权副本可能以另一个账户运行，`%USERPROFILE%` 和 mihomo 自己的默认配置目录都会跟着变。`mihomo.args` 里的相对路径按 **mihomo.exe 所在目录**解析（启动时显式设了工作目录）。
 - **内核一旦提权就一直提权**（TUN 生效之后）：「退出并停止 Mihomo」会再弹一次 UAC，由提权副本按记录下来的 PID 结束它；取消则只提示「提权启动被取消或失败」，程序不退出。
@@ -146,7 +146,7 @@ ui:
 
 - **托盘自身不提权**：Go 版启动时就用 `ShellExecute("runas")` 把整个程序提权；这里托盘始终普通权限，只有 TUN 需要管理员，由一次性提权副本重启内核（见「已知行为」）。
 - **停止内核只结束本程序启动或路径匹配的实例**：Go 版用 `taskkill /IM mihomo.exe`，会误杀其他实例。
-- **内核与配置优先由 `tray.yml` 指明**：Go 版固定读 `%USERPROFILE%\.config\mihomo\config.yaml`、只在 PATH / 程序目录 / `~/scoop/shims` 找内核；这里 `mihomo.home` / `mihomo.config` 一旦填写就是唯一来源，留空时内核走自发现（程序目录 → PATH → Scoop，含捆绑布局的 `bin\`/`core\`），配置则按上面的顺序解析，控制器按 mihomo 自己的优先级解析（见「内核、配置与控制器来自哪里」）。
+- **内核与配置优先由 `tray.yml` 指明**：Go 版固定读 `%USERPROFILE%\.config\mihomo\config.yaml`、只在 PATH / 程序目录 / `~/scoop/shims` 找内核；这里 `mihomo.home` / `mihomo.config` 一旦填写就是唯一来源，留空时内核走自发现（程序目录 → `PATH`，含捆绑布局的 `bin\`/`core\`，并跟随 Scoop shim），配置则按上面的顺序解析，控制器按 mihomo 自己的优先级解析（见「内核、配置与控制器来自哪里」）。
 - **新增**：代理分组子菜单（含 `URLTest`/`Fallback` 固定与取消固定）、「打开 Web 面板」、界面语言表与 `lang/*.yml`、可配轮询间隔（Go 版固定 5 s）、「更多」子菜单里的 `重载配置`/`关闭所有连接`（`DELETE /connections`）/`重启内核`（`POST /restart`）/`强制重启内核`（按 `tray.yml` 归一别人的内核）。
 - **同样不做**（相对 CFW 式图形客户端）：设置窗口、自绘弹窗、节点延迟色点、流量曲线、订阅刷新、脚本执行；需要图形化的设置就用内核自己的面板（菜单里的「打开 Web 面板」）。
 

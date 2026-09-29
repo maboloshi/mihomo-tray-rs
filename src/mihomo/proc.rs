@@ -32,8 +32,9 @@ use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
 use crate::i18n;
 
-/// The kernel's file name: the one binary the discovery chain looks for, and the
-/// only image a helper may start.
+/// The kernel's file name: the one the discovery chain looks for. A kernel that is
+/// called something else has to be named by `mihomo.path` — nothing searches for
+/// it, and no helper refuses it for its name.
 pub const KERNEL_EXE: &str = "mihomo.exe";
 /// `OpenProcess` failing with this is how a higher-integrity process says "not
 /// yours to look at"; anything else is a process that simply went away.
@@ -702,19 +703,16 @@ fn parse_pid(args: &[String]) -> Option<u32> {
     (pid != 0).then_some(pid)
 }
 
-/// The image of `pid`, but only while that process is a `mihomo.exe`.
+/// The image of `pid`, whatever it is called.
 ///
-/// The name check is what keeps the helper from becoming a way to launch an
-/// arbitrary image with administrator rights: the path is taken from the process
-/// itself, and only a kernel is accepted.
+/// No name check: the kernel may have been renamed, and `mihomo.path` is free to
+/// name anything. The name never was a boundary in the first place — a caller that
+/// can start a process can name its file `mihomo.exe` — so requiring it would only
+/// have refused renamed kernels while stopping nobody. What is checked is that the
+/// image can be read at all.
 fn kernel_image(pid: u32) -> Option<PathBuf> {
     let (path, denied) = image_path(pid);
-    (!denied && !path.as_os_str().is_empty() && is_kernel_name(&path)).then_some(path)
-}
-
-fn is_kernel_name(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case(KERNEL_EXE))
+    (!denied && !path.as_os_str().is_empty()).then_some(path)
 }
 
 /// `argv` of `pid`, exactly as that process received it.
@@ -858,14 +856,20 @@ mod tests {
     }
 
     #[test]
-    fn only_images_named_like_the_kernel_are_accepted() {
-        assert!(is_kernel_name(Path::new(r"C:\anywhere\mihomo.exe")));
-        assert!(is_kernel_name(Path::new(r"C:\anywhere\MIHOMO.EXE")));
-        assert!(!is_kernel_name(Path::new(r"C:\anywhere\mihomo.exe.bak")));
-        assert!(!is_kernel_name(Path::new(r"C:\anywhere\notmihomo.exe")));
-        // This test binary is not the kernel, so the helper must refuse it even
-        // though it is a running process with a readable command line.
-        assert_eq!(kernel_image(std::process::id()), None);
+    fn an_images_name_is_not_what_decides() {
+        // A helper only ever starts the image of the process it was handed, so the
+        // name is not a gate: a kernel may have been renamed, and `mihomo.path` is
+        // free to name anything. This test binary is such an image — it is not
+        // called `mihomo.exe` and the helper reads it all the same.
+        let own = kernel_image(std::process::id()).expect("own image path");
+        assert!(own.is_file(), "{own:?}");
+        assert!(
+            !own.file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("mihomo.exe")),
+            "{own:?} is the kernel's own name, so this proves nothing"
+        );
+        // A PID that is not running has no image at all.
+        assert_eq!(kernel_image(u32::MAX), None);
     }
 
     #[test]

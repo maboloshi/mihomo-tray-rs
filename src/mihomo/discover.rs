@@ -4,7 +4,9 @@
 //! The kernel binary is what `mihomo.path` names and otherwise the first hit of
 //! the discovery chain: this executable's own directory — `mihomo.exe` beside the
 //! tray, or in `bin\`/`core\`, which is how a bundled release is packed — then
-//! `PATH`, then scoop. mihomo itself searches for nothing: it is told `-d`/`-f` or
+//! `PATH`, where a scoop shim is followed to the binary it launches. The chain
+//! looks for one name, `mihomo.exe`: a kernel called something else is named by
+//! `mihomo.path`. mihomo itself searches for nothing: it is told `-d`/`-f` or
 //! falls back to its own directory, so a binary found here is always launched with
 //! absolute `-d` and `-f`, which is what keeps the kernel and this program reading
 //! the same files.
@@ -119,16 +121,15 @@ fn find_kernel_among(
     Ok(found_kernel(candidates))
 }
 
-/// The first candidate that is a file, preferring a real binary over a scoop shim:
-/// the shim carries the kernel's name but is a launcher, so a kernel started from
-/// it reports an image the shim does not have.
+/// The first candidate that is a file — `PATH` order decides, so the answer is the
+/// one the shell would start too. A scoop shim is then followed to the binary it
+/// launches: the shim carries the kernel's name but is a launcher, and starting it
+/// means talking to a process whose image is not the path this program recorded.
 fn found_kernel(candidates: &[PathBuf]) -> Option<Kernel> {
-    let files: Vec<&PathBuf> = candidates.iter().filter(|path| path.is_file()).collect();
-    files
-        .iter()
-        .find(|path| !proc::is_shim(path))
-        .or_else(|| files.first())
-        .map(|path| Kernel::Discovered((*path).clone()))
+    let first = candidates.iter().find(|path| path.is_file())?;
+    Some(Kernel::Discovered(
+        shim_target(first).unwrap_or_else(|| first.clone()),
+    ))
 }
 
 /// This executable's own directory: where a bundled kernel lives.
@@ -139,29 +140,23 @@ fn exe_dir() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// The candidate kernels, highest priority first: beside the tray (or in `bin\`,
-/// `core\`), then every `PATH` entry, then scoop.
+/// The candidate kernels, in the order they are tried: beside the tray (or in
+/// `bin\`, `core\`), then every `PATH` entry.
+///
+/// Scoop needs no place of its own: its `shims` directory is on `PATH` on any
+/// machine that has scoop, and the `mihomo.shim` beside the shim names the real
+/// binary — see [`shim_target`].
 ///
 /// Nothing here looks at a running process: a kernel this program did not start is
 /// not silently adopted. "Force restart" is the one action that replaces such a
 /// kernel, and it asks first.
 fn kernel_candidates() -> Vec<PathBuf> {
-    kernel_candidates_for(
-        exe_dir().as_deref(),
-        std::env::var_os("PATH").as_deref(),
-        std::env::var_os("SCOOP").map(PathBuf::from).as_deref(),
-        home_dir().as_deref(),
-    )
+    kernel_candidates_for(exe_dir().as_deref(), std::env::var_os("PATH").as_deref())
 }
 
-/// The chain itself, with every place handed in. `PATH` is taken as the raw
+/// The chain itself, with both places handed in. `PATH` is taken as the raw
 /// variable so a test can describe one without touching this machine's.
-fn kernel_candidates_for(
-    exe_dir: Option<&Path>,
-    path_var: Option<&OsStr>,
-    scoop: Option<&Path>,
-    home: Option<&Path>,
-) -> Vec<PathBuf> {
+fn kernel_candidates_for(exe_dir: Option<&Path>, path_var: Option<&OsStr>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(dir) = exe_dir {
         out.push(dir.join(proc::KERNEL_EXE));
@@ -173,36 +168,39 @@ fn kernel_candidates_for(
             out.push(entry.join(proc::KERNEL_EXE));
         }
     }
-    if let Some(scoop) = scoop {
-        scoop_candidates(scoop, &mut out);
-        out.push(scoop.join("shims").join(proc::KERNEL_EXE));
-    }
-    if let Some(home) = home {
-        out.push(home.join("scoop").join("shims").join(proc::KERNEL_EXE));
-    }
     out
 }
 
-/// `%SCOOP%\apps\mihomo*\current\mihomo.exe`: scoop keeps every version in a
-/// directory of its own and points `current` at the installed one. Sorted, so two
-/// installs of the same name do not make the answer depend on the file system.
-fn scoop_candidates(scoop: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(scoop.join("apps")) else {
-        return;
-    };
-    let mut found: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .starts_with("mihomo")
-        })
-        .map(|entry| entry.path().join("current").join(proc::KERNEL_EXE))
-        .collect();
-    found.sort();
-    out.extend(found);
+/// The binary a scoop shim launches, read from the `<name>.shim` file beside it:
+/// scoop writes the target there (`path = "D:\App\Scoop\apps\mihomo\current\
+/// mihomo.exe"`), which is the file worth starting — the shim itself is 12 KiB of
+/// launcher that reports somebody else's image.
+///
+/// **Only `path` is read.** The other keys a shim may carry — `args`, an
+/// environment — are deliberately ignored: what a kernel is started with is
+/// decided in one place, `tray.yml` and this program's own `-d`/`-f`, and a second
+/// source of arguments is how the kernel and this program end up disagreeing about
+/// which file is being read. A shim that does carry arguments therefore has them
+/// dropped when it is followed; leaving it unfollowed would instead mean talking to
+/// a process whose image is not the path this program recorded.
+///
+/// `None` when this is not a shim, the file is missing or unreadable, or it names
+/// nothing that exists: the shim is then the honest answer, and stopping the
+/// kernel goes through its launcher family.
+fn shim_target(shim: &Path) -> Option<PathBuf> {
+    if !proc::is_shim(shim) {
+        return None;
+    }
+    let manifest = std::fs::read_to_string(shim.with_extension("shim")).ok()?;
+    let target = crate::settings::strip_bom(&manifest)
+        .lines()
+        .find_map(|line| {
+            let (key, value) = crate::settings::strip_comment(line).split_once('=')?;
+            key.trim()
+                .eq_ignore_ascii_case("path")
+                .then(|| PathBuf::from(value.trim().trim_matches('"')))
+        })?;
+    target.is_file().then_some(target)
 }
 
 /// The configuration file `mihomo.config` declares, if it declares one.
@@ -941,26 +939,29 @@ mod tests {
             .collect()
     }
 
-    /// A file in a `shims` directory, which is what a scoop shim looks like: a
-    /// launcher that carries the kernel's name.
-    fn shim(dir: &Path) -> PathBuf {
-        let dir = dir.join("shims");
+    /// A scoop shim: `shims\mihomo.exe` with the `mihomo.shim` beside it that names
+    /// the binary it launches.
+    fn shim(root: &Path, target: &Path) -> PathBuf {
+        let dir = root.join("shims");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(proc::KERNEL_EXE);
         std::fs::write(&file, "").unwrap();
+        std::fs::write(
+            dir.join("mihomo.shim"),
+            format!("path = \"{}\"\n", target.display()),
+        )
+        .unwrap();
         file
     }
 
     #[test]
-    fn the_chain_takes_the_first_hit_and_prefers_a_real_binary() {
+    fn the_chain_takes_the_first_hit() {
         let dir = std::env::temp_dir().join("mihomo-tray-test-chain");
         let _ = std::fs::remove_dir_all(&dir);
         let found = chain(&dir, &["mihomo.exe", "second.exe"]);
         let (beside, second) = (&found[0], &found[1]);
-        let launcher = shim(&dir);
-        assert!(proc::is_shim(&launcher));
 
-        // The first existing candidate wins.
+        // `PATH` order decides, so the answer is the one the shell would start.
         assert_eq!(
             found_kernel(&[beside.clone(), second.clone()]),
             Some(Kernel::Discovered(beside.clone()))
@@ -971,20 +972,78 @@ mod tests {
             found_kernel(&[dir.join("absent.exe"), second.clone()]),
             Some(Kernel::Discovered(second.clone()))
         );
-        // A scoop shim is a launcher with the kernel's name, so a real binary later
-        // in the chain is preferred — a kernel started from the shim reports an
-        // image the shim does not have.
+        assert_eq!(found_kernel(&[]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scoop_shim_is_followed_to_the_binary_it_launches() {
+        let root = std::env::temp_dir().join("mihomo-tray-test-scoop");
+        let _ = std::fs::remove_dir_all(&root);
+        let installed = root
+            .join("apps")
+            .join("mihomo-v3")
+            .join("current")
+            .join(proc::KERNEL_EXE);
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "").unwrap();
+        let launcher = shim(&root, &installed);
+
+        // The shim is a launcher whose process reports somebody else's image, so
+        // the binary it names is what gets started — identity, "stop the kernel"
+        // and "force restart" then all talk about the real file.
         assert_eq!(
-            found_kernel(&[launcher.clone(), second.clone()]),
-            Some(Kernel::Discovered(second.clone()))
+            found_kernel(std::slice::from_ref(&launcher)),
+            Some(Kernel::Discovered(installed.clone()))
         );
-        // A shim is still better than nothing.
+        assert_eq!(shim_target(&launcher), Some(installed.clone()));
+        // Other keys a shim may carry are not read: what a kernel is started with
+        // is decided by `tray.yml`, never by a launcher's manifest.
+        std::fs::write(
+            launcher.with_extension("shim"),
+            format!(
+                "path = \"{}\"\nargs = -d D:\\elsewhere\nenv = FOO=bar\n",
+                installed.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(shim_target(&launcher), Some(installed.clone()));
+        // A manifest that names nothing that exists is not followed: the shim
+        // itself is then the honest answer (its launcher family is what gets
+        // stopped).
+        let missing = root.join("apps").join("gone").join(proc::KERNEL_EXE);
+        std::fs::write(
+            launcher.with_extension("shim"),
+            format!("path = \"{}\"\n", missing.display()),
+        )
+        .unwrap();
+        assert_eq!(shim_target(&launcher), None);
         assert_eq!(
             found_kernel(std::slice::from_ref(&launcher)),
             Some(Kernel::Discovered(launcher.clone()))
         );
-        assert_eq!(found_kernel(&[]), None);
-        let _ = std::fs::remove_dir_all(&dir);
+        // A file that is not in a `shims` directory is never treated as a launcher,
+        // whatever happens to sit beside it.
+        assert_eq!(shim_target(&installed), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_chain_looks_beside_the_tray_then_along_path() {
+        let path_var = std::env::join_paths([r"C:\first", r"C:\second"]).unwrap();
+        let candidates = kernel_candidates_for(Some(Path::new(r"C:\tray")), Some(&path_var));
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from(r"C:\tray\mihomo.exe"),
+                PathBuf::from(r"C:\tray\bin\mihomo.exe"),
+                PathBuf::from(r"C:\tray\core\mihomo.exe"),
+                PathBuf::from(r"C:\first\mihomo.exe"),
+                PathBuf::from(r"C:\second\mihomo.exe"),
+            ]
+        );
+        // No executable directory and no `PATH` is an empty chain, not a panic.
+        assert_eq!(kernel_candidates_for(None, None), Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -1002,58 +1061,6 @@ mod tests {
             Some(Kernel::Declared(found[0].clone()))
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_chain_looks_beside_the_tray_then_along_path_then_in_scoop() {
-        let path_var = std::env::join_paths([r"C:\first", r"C:\second"]).unwrap();
-        let candidates = kernel_candidates_for(
-            Some(Path::new(r"C:\tray")),
-            Some(&path_var),
-            Some(Path::new(r"C:\scoop")),
-            Some(Path::new(r"C:\Users\someone")),
-        );
-        assert_eq!(
-            candidates,
-            vec![
-                PathBuf::from(r"C:\tray\mihomo.exe"),
-                PathBuf::from(r"C:\tray\bin\mihomo.exe"),
-                PathBuf::from(r"C:\tray\core\mihomo.exe"),
-                PathBuf::from(r"C:\first\mihomo.exe"),
-                PathBuf::from(r"C:\second\mihomo.exe"),
-                PathBuf::from(r"C:\scoop\shims\mihomo.exe"),
-                PathBuf::from(r"C:\Users\someone\scoop\shims\mihomo.exe"),
-            ]
-        );
-    }
-
-    #[test]
-    fn scoop_installs_are_found_through_their_current_link() {
-        let root = std::env::temp_dir().join("mihomo-tray-test-scoop");
-        let _ = std::fs::remove_dir_all(&root);
-        let installed = root
-            .join("apps")
-            .join("mihomo-v3")
-            .join("current")
-            .join(proc::KERNEL_EXE);
-        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(root.join("apps").join("other-app")).unwrap();
-        std::fs::write(&installed, "").unwrap();
-
-        let candidates = kernel_candidates_for(None, None, Some(&root), None);
-        // A real installed version comes before the shim that launches it, and an
-        // application that merely starts with `mihomo` is not mistaken for one.
-        assert_eq!(candidates.first(), Some(&installed));
-        assert_eq!(
-            candidates.last(),
-            Some(&root.join("shims").join(proc::KERNEL_EXE))
-        );
-        assert!(
-            !candidates
-                .iter()
-                .any(|candidate| candidate.to_string_lossy().contains("other-app"))
-        );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

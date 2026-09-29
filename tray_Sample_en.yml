@@ -10,9 +10,11 @@
 # program starts is a directory nobody chose.
 
 mihomo:
-  path: ""             # mihomo.exe to start; empty = discover it: beside this
-                       # program (and in bin\, core\), then on PATH, then in scoop.
-                       # When set it must be absolute, e.g.
+  path: ""             # the kernel to start; empty = discover it: beside this program
+                       # (and in bin\, core\), then along PATH in order (only the name
+                       # mihomo.exe is searched; a scoop shims\mihomo.exe is followed
+                       # to the binary its mihomo.shim names). A kernel that was
+                       # renamed has to be named here, and absolutely, e.g.
                        # %USERPROFILE%\scoop\apps\mihomo\current\mihomo.exe
   home: ""             # mihomo's -d (configuration directory);
                        # empty = the directory of the configuration the kernel brings
