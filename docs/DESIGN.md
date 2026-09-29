@@ -276,7 +276,7 @@ ui:
 
 - `[profile.release]`：`opt-level="z"`、`lto=true`、`codegen-units=1`、`panic="abort"`、`strip=true`、`incremental=false`。
 - `#![windows_subsystem = "windows"]`（无控制台窗口）。
-- 应用清单：`Microsoft.Windows.Common-Controls 6.0` + `supportedOS {8e0f7a12-…}`（Win10/11）+ `permonitorv2`。这决定菜单圆角、主题与 DPI 是否正确——已实测（见 `docs/assets/native-menu-light.png`、`docs/assets/native-menu-dark.png`）。
+- 应用清单：`Microsoft.Windows.Common-Controls 6.0` + `supportedOS {8e0f7a12-…}`（Win10/11）+ `permonitorv2`。这决定菜单圆角、主题与 DPI 是否正确——已实测（见 `docs/assets/app-menu-light.png`、`docs/assets/app-menu-dark.png`）。
 - 清单以外部文件 `<exe>.name.manifest` 或 `build.rs` 嵌入，Phase 1 决定（外部清单便于调试）。
 
 ---

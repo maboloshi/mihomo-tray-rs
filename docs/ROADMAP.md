@@ -8,9 +8,9 @@ Phase 1（MVP）已实现并真机验证：
 
 - 9 项菜单功能（状态行 / 系统代理 / 代理模式 / TUN / 代理分组 / 开机自启动 / 重载配置 / 打开 Web 面板 / 退出两项）全部可用
 - 内核自发现（同目录/`bin`/`core` → `PATH`，只搜 `mihomo.exe` 这个名字，命中 Scoop shim 时按 `mihomo.shim` 的 `path` 换成真内核；`mihomo.path` 填了就只认它，改名内核也支持），配置/控制器按 mihomo 自己的规则解析（`mihomo.home`/`config` 或内核带来的那份 + 运行内核的 argv → 环境变量 → 配置文件 → `controller.*` 兜底），没有端口探测；「配置文件里没有 `external-controller`、地址由命令行或环境变量注入」的机器同样能定位
-- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（79 个单测）
-- 实测：exe 388.5 KiB（397,824 B；本轮 11 条差距修复 +2 条文案后又测了一次，之前是 381,952 B）；空闲私有内存 2.6–3.4 MB，工作集 ~15 MB
-- 验证方式：真机运行截图（`assets/app-menu-light.png`）+ 分组数据逐项比对 live API + 长列表滚动箭头（`assets/native-menu-scroll-arrows.png`）
+- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（89 个单测）
+- 实测（0.2.1，rustc 1.98.0）：exe 343,040 B（≈335 KiB）；空闲私有内存 2.2 MB（私有工作集）、工作集 ~15 MB（冷启动 20 s 的读数，见 [README.md](../README.md)）
+- 验证方式：真机运行截图 [`app-menu-light.png`](assets/app-menu-light.png) / [`app-menu-dark.png`](assets/app-menu-dark.png) + 分组数据逐项比对 live API + 长列表滚动箭头（[`native-menu-scroll-arrows.png`](assets/native-menu-scroll-arrows.png)）
 
 ## 需要人工点一遍的清单（自动化覆盖不到）
 
