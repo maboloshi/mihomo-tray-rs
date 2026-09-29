@@ -7,7 +7,7 @@
 Phase 1（MVP）已实现并真机验证：
 
 - 9 项菜单功能（状态行 / 系统代理 / 代理模式 / TUN / 代理分组 / 开机自启动 / 重载配置 / 打开 Web 面板 / 退出两项）全部可用
-- 内核/配置/控制器都按 mihomo 自己的规则解析（`mihomo.path`/`home`/`config` + 运行内核的 argv → 环境变量 → 配置文件 → `controller.*` 兜底），没有搜索、没有端口探测；「配置文件里没有 `external-controller`、地址由命令行或环境变量注入」的机器同样能定位
+- 内核自发现（同目录/`bin`/`core` → `PATH` → Scoop，`mihomo.path` 填了就只认它），配置/控制器按 mihomo 自己的规则解析（`mihomo.home`/`config` 或内核带来的那份 + 运行内核的 argv → 环境变量 → 配置文件 → `controller.*` 兜底），没有端口探测；「配置文件里没有 `external-controller`、地址由命令行或环境变量注入」的机器同样能定位
 - `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（79 个单测）
 - 实测：exe 388.5 KiB（397,824 B；本轮 11 条差距修复 +2 条文案后又测了一次，之前是 381,952 B）；空闲私有内存 2.6–3.4 MB，工作集 ~15 MB
 - 验证方式：真机运行截图（`assets/app-menu-light.png`）+ 分组数据逐项比对 live API + 长列表滚动箭头（`assets/native-menu-scroll-arrows.png`）
@@ -87,7 +87,7 @@ Phase 1（MVP）已实现并真机验证：
 6. **停止内核不要用 `taskkill /IM`**：只结束自己启动或路径匹配的进程。
 7. **控制器设置按 mihomo 自己的优先级解析**：运行内核 argv 的 `-ext-ctl`/`-secret` → `CLASH_OVERRIDE_*` 环境变量 → 内核配置文件里的 `external-controller`/`secret` → `tray.yml` 的 `controller.address`/`secret`（**兜底，不是覆盖**）。禁止再引入端口探测或"猜一个常见端口"，也禁止让 `controller.*` 反向压过内核设置（详见 DESIGN §4）。
 8. **提交分组**：一个主题一个 commit；本机 git 一律 `-c core.autocrlf=false`（严格 LF）。
-9. **提权只走一次性辅助进程，且只收 PID、用退出码回答**：同一个 exe 的 `--kernel-start-elevated` / `--kernel-stop-elevated` 隐藏模式，在单实例与窗口逻辑之前处理；内核的映像与启动参数必须由副本从那个进程自己读出（映像名必须是 `mihomo.exe`），**禁止**接受命令行传入的 exe 路径或启动参数——否则就是一个"UAC 弹窗写着本程序、实际以管理员运行任意程序"的提权原语。启动成功时副本用**退出码回传新内核的 PID**（失败为负数），托盘记下来供后续停止使用；**禁止**用文件/管道回传（等于让管理员按调用者给的路径写文件）。路径比较一律走 `proc::same_image`（junction/大小写归一化），不得直接比字符串。不得引入常驻提权进程、计划任务或服务。
+9. **提权只走一次性辅助进程，映像由副本从 PID 读出、用退出码回答**：同一个 exe 的 `--kernel-start-elevated` / `--kernel-stop-elevated` / `--kernel-replace-elevated` 隐藏模式，在单实例与窗口逻辑之前处理；**启动哪个映像必须由副本从那个进程自己读出**（`kernel_image`，映像名必须是 `mihomo.exe`），**禁止**接受命令行传入的 exe 路径——那是一个"UAC 弹窗写着本程序、实际以管理员运行任意程序"的提权原语。启动参数：start 副本从那个进程的 argv 读（唯一的忠实来源），replace 副本收托盘给的参数（`tray.yml` 的唯一可读者是托盘：提权副本以另一个账户运行时未必看得见它，让它自己读反而会两边不一致）——**参数通道不是安全边界**（能改 `tray.yml` 的攻击者本来就能让 mihomo 执行任意动作），映像通道才是。启动成功时副本用**退出码回传新内核的 PID**（失败为负数），托盘记下来供后续停止使用；**禁止**用文件/管道回传（等于让管理员按调用者给的路径写文件）。路径比较一律走 `proc::same_image`（junction/大小写归一化），不得直接比字符串。不得引入常驻提权进程、计划任务或服务。
 10. **先量后设计**：涉及进程身份、权限或路径的判断，先在同一台机器上实测一次 Win32 行为（映像路径、token、端口归属）再写逻辑；本轮三次误判（shim 拓扑、分类判定）都是没先量造成的。坑清单见 DESIGN §5.1。
 11. **结论必须有直接证据**：`stopped > 0`、`denied > 0`、子句柄、菜单勾选都只是间接信号，曾造成"已停止"的假象；结论只能落在"进程还在不在"或"权威方（提权副本）怎么说"。
 

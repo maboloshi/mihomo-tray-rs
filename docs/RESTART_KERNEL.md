@@ -8,7 +8,7 @@
 |---|---|---|---|
 | **重启内核** | 让当前内核进程重启一次（清内部状态、换二进制、配置大改） | mihomo API `POST /restart` | 控制器可达（要 secret） |
 | **重载配置** | 原地重读配置文件，不换进程 | `PUT /configs?force=true`（**已实现**为菜单「重载配置」） | 同上 |
-| **强制重启** | 停掉当前内核，按 `tray.yml` 重新拉起（"收养"别人的内核） | 我们自己停 + `discover::launch_args`；提权时经 `--kernel-start-elevated` | 停别人的内核要用户确认；提权内核要 UAC |
+| **强制重启** | 停掉当前内核，按 `tray.yml` 重新拉起（"收养"别人的内核） | 我们自己停 + `discover::launch_args`；提权时经 `--kernel-replace-elevated` | 停别人的内核要用户确认；提权内核要 UAC |
 
 菜单里加「重启内核」走 API；「强制重启」是**另一个**动作，独立菜单项、独立确认。
 
@@ -76,7 +76,7 @@
 - `src/app.rs`：`Command::RestartKernel` / `Action::RestartKernel` + `restart_kernel()`（§3 七步）；`Worker.client` 由 `Option<&Client>` 改为 owned `Option<Client>`，并把 `version` 缓存搬进 `Worker` 一起替换。**"client 热替换"的实际成本远小于草稿估计**：`Client` 本来就是 `Clone`，`discover::find_controller` 本来就返回 owned 值，只是 worker 一直在借它。
 - `src/app.rs`：`Command::ForceRestartKernel` + `force_restart_kernel()` / `replace_kernel()`（本地"停 + 起"）/ `elevate_replacement()`（交提权副本）/ `adopt_new_kernel()`（重解析 + 等应答）/ `confirm_foreign_kernel()`。
 - `src/win/mod.rs`：`confirm()`（Yes/No，默认「否」；在 worker 线程上弹，与 UAC 一样不占用 UI 线程）。
-- `src/mihomo/proc.rs` + `src/main.rs` + `src/win/elevate.rs`：`--kernel-replace-elevated <pid>` 副本（自己读 `tray.yml`）、新退出码 `HELPER_NO_SETTINGS`（`-7`）、`kernel_replace_params()`。
+- `src/mihomo/proc.rs` + `src/main.rs` + `src/win/elevate.rs`：`--kernel-replace-elevated <pid> <参数…>` 副本（映像自己从 PID 读，参数收托盘的）、`kernel_replace_params()`、`proc::quoted_args()`（`ShellExecuteExW` 只能收一个字符串，所以参数的边界要靠引用往返）。
 - `src/win/menu.rs`：「更多」子菜单（`重载配置` / `重启内核` / `强制重启内核`）；子菜单在"有控制器**或**有内核在跑"时可展开，项级灰显各按自己的条件。
 - `src/i18n.rs` + `lang/en-US.yml`：菜单项、状态注记、失败文案、确认框（**四处同步**：`messages!` 列表、zh/en 表、语言文件；带占位符的模板配一个 `impl Messages` 里的渲染方法，单测盯着键与占位符一一对应）。
 - `README.md`（特性/已知行为）、`docs/DESIGN.md`（§3、§5、§8）、本文档。
@@ -86,11 +86,12 @@
 
 目标：把"别的启动器或上一次会话留下的内核"变成**按 `tray.yml` 跑的内核**（设置从此可知）。
 
-- **身份与许可**：记录的 PID 匹配，或映像匹配 `mihomo.path`（`proc::same_image`）才静默做；否则弹一次 Yes/No（默认按钮「否」），写明映像路径与 PID。**绝不 `taskkill /IM`**（ROADMAP 硬约束 6）：只结束选中的那个进程及其启动器家族。
+- **身份与许可**：记录的 PID 匹配，或映像匹配本程序解析出的内核（声明或自发现的结果，`proc::same_image`）才静默做；否则弹一次 Yes/No（默认按钮「否」），写明映像路径与 PID。**绝不 `taskkill /IM`**（ROADMAP 硬约束 6）：只结束选中的那个进程及其启动器家族。
 - **提权保持**：提权内核必须由副本完成"停 + 起"，否则重启后掉权限、TUN 失效。
-- **副本怎么知道"要起什么"**（硬约束 9 禁止命令行传 exe/args）：
-  - **(a) 否决**：调用方把值写进副本命令行 → 破掉"调用方不能规定以管理员启动什么"的性质，与硬约束 9 冲突；
-  - **(b) 已实现**：副本自己读 `tray.yml`（`settings::settings_path()` → `discover::launch_args`），调用方只给 PID，新模式 `--kernel-replace-elevated <pid>`。代价：它在提权账户下 `%APPDATA%` 不是你的，只有 exe 旁的便携那份一定可见；读不到时回 `-7`（`HELPER_NO_SETTINGS`）并**保持旧内核不动**。
+- **副本怎么知道"要起什么"**（硬约束 9：映像不可由调用方指定）：
+  - **(a) 否决**：调用方把**映像**写进副本命令行 → 破掉"调用方不能规定以管理员启动什么"的性质，与硬约束 9 冲突；
+  - **(b) 旧实现（已废）**：副本自己读 `tray.yml`。代价是它在提权账户下 `%APPDATA%` 不是你的，只有 exe 旁的便携那份一定可见；读不到时回 `-7`（`HELPER_NO_SETTINGS`）并保持旧内核不动——而"参数由调用方给"其实与"副本读 tray.yml"安全性相同（能改 `tray.yml` 的攻击者本来就能让 mihomo 执行任意动作），所以这层代价白付；
+  - **(c) 已实现**：映像由副本从 PID 自己读（`kernel_image`，名字必须是 `mihomo.exe`），参数由托盘算好传进去，新模式 `--kernel-replace-elevated <pid> <参数…>`。跨账户可见性问题整类消失，`HELPER_NO_SETTINGS` 随之删除。**注意**：提权场景下强制重启只换配置与参数，不换 binary（映像还是那个内核自己的）。
 - **拍板记录**（本次会话，用户决定）：
   - 「更多」= `重载配置` / `重启内核` / `强制重启内核`；`打开 Web 面板`、`开机自启动`、`退出` 留在根菜单；`强制重启内核` 无内核在跑时灰显。
   - 确认框只在运行内核的映像 ≠ `mihomo.path` 或读不出映像时出现（含提权内核）。
@@ -107,7 +108,7 @@
 - 与别的启动器（clash-verge 等）打架：强制重启后对方可能再把它的内核拉起来。
 - 无控制器时无法重启（菜单项灰显），此时唯一手段是强制重启。
 - 「强制重启」期间要结束一个**不是本程序启动的**进程，所以它只认"选中的那一个 + 它的启动器家族"：别的 `mihomo.exe` 只要映像不同就不碰（`pick_kernel` 从不选可读但路径不同的实例）。
-- 提权副本读 `tray.yml` 的可见性取决于它运行在哪个账户下（见 §5 的(b)）；跨账户授权时只有便携布局可靠，读不到就回 `-7`、旧内核保持不动。
+- 提权副本不再读 `tray.yml`（见 §5 的(c)），所以"跨账户看不到设置"这类失败不再存在；参数由托盘给出，映像必须仍是那个内核自己的（`mihomo.exe`），否则回 `-2` 且旧内核保持不动。
 
 ## 7. 验收
 

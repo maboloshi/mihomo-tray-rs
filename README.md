@@ -25,7 +25,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 ## 环境要求
 
 - Windows 10/11 (x64)
-- [mihomo](https://github.com/MetaCubeX/mihomo) 已安装；本程序**不搜索它**，要在 `tray.yml` 里写明 `mihomo.path`
+- [mihomo](https://github.com/MetaCubeX/mihomo) 已安装；本程序会**自发现**它（同目录 → `PATH` → Scoop），也可以照旧在 `tray.yml` 里写明 `mihomo.path`
 - 构建需要 Rust stable（`edition 2024`，MSRV 1.85），无需额外工具链
 
 ## 构建
@@ -103,17 +103,18 @@ ui:
 
 ## 内核、配置与控制器来自哪里
 
-**没有搜索、也没有端口探测**：三者都按 mihomo 自己的规则解析，认不出来就报错（并指出该改哪一项），而不是猜一个。
+**内核会自发现，配置按 mihomo 自己的规则解析，但没有端口探测**：认不出来就报错（并指出该改哪一项），而不是猜一个。
 
 | 目标 | 来源 |
 |---|---|
-| `mihomo.exe` | `tray.yml mihomo.path`（必填、绝对路径） |
-| 配置目录 | `mihomo.home` → `mihomo.config` 所在目录 → 内核默认 `%USERPROFILE%\.config\mihomo`（`XDG_CONFIG_HOME` 仅在该目录不存在时参与，与 mihomo 的判定一致） |
-| 配置文件 | `mihomo.config` → `<配置目录>\config.yaml` |
+| `mihomo.exe` | `tray.yml mihomo.path`（填了就只认它，填错直接报错，不会退回去搜索）；留空则自发现：本程序同目录（含 `bin\`、`core\`）→ `PATH` → Scoop（`apps\mihomo*\current`、`shims`、`~/scoop/shims`）。命中多个时优先真 binary，而不是同名启动器 shim |
+| 配置目录 | `mihomo.home` → `mihomo.config` 所在目录 → 内核带来的那份配置所在目录 → 内核默认 `%USERPROFILE%\.config\mihomo`（`XDG_CONFIG_HOME` 仅在该目录不存在时参与，与 mihomo 的判定一致） |
+| 配置文件 | `mihomo.config` → `<配置目录>\config.yaml`；`home`/`config` 都留空时先看内核带来的那份——内核在**本程序目录树**里（同目录或 `bin\`/`core\`）时先看本程序所在目录的 `config.yaml`，再看内核同目录的 `config.yaml`，都没有才落到 mihomo 默认目录 |
 | 内核命令行 | 运行中那个内核自己的 argv：`-f`/`-d` 说明它读的是哪份文件，`-ext-ctl`/`-secret` 非空时**覆盖**配置文件（这就是 mihomo 自己的优先级）。同用户的内核可读；提权内核读不到，就跳过这一来源 |
 | 控制器地址 / secret | 上述 argv → `CLASH_OVERRIDE_EXTERNAL_CONTROLLER` / `CLASH_OVERRIDE_SECRET`（这两个环境变量正是同名 flag 的默认值）→ 配置文件里的 `external-controller` / `secret` → `tray.yml` 的 `controller.address` / `secret` |
 
 - **逐字段判定**：mihomo 侧某个字段没设置、或读不到，才用 `tray.yml` 的同名字段——`controller.*` 是兜底，不是覆盖。
+- 自发现到的内核会在状态行说明一次（`已自发现内核: <路径>`，约一个轮询周期后消失）；搜索都落空时报「没找到 mihomo.exe」，而不是拿一个来路不明的启动。
 - 内核没开 `external-controller`、或只开了 `-tls`/`-unix`/`-pipe` 控制器，都会明确报出来（不再靠探测兜）。
 - 本程序启动内核时一律显式传 `-d`/`-f`（绝对路径），所以内核读的就是这里读的那一份；提权副本可能以另一个账户运行，`%USERPROFILE%` 会跟着变，显式 `-d` 正是为此。环境变量里的 `CLASH_OVERRIDE_EXTERNAL_CONTROLLER` / `CLASH_OVERRIDE_SECRET` 也会在启动时写进命令行（`-ext-ctl` / `-secret`，语义相同）：**UAC 不传递环境**，而 TUN 提权副本只复用命令行，写出来才能保证提权后还是同一个控制器。
 - 唯一看不到的情况：**内核由别的启动器拉起、用 `-ext-ctl`/`-secret` 覆盖了配置、而它的命令行又读不到**（提权）。这时会报不可达/读不到内核配置，请在 `controller.*` 里写实际值。
@@ -122,7 +123,7 @@ ui:
 
 - **重载配置不需要知道 yml 路径**：`PUT /configs?force=true` 且 `path` 为空时，内核回落到自己启动时的配置文件；`force=true` 才会重建 inbound 监听器。
 - **TUN 失败不会返回 HTTP 错误**（内核只记日志并把 `enable` 置 false），因此本程序以回读 `GET /configs` 的结果为准：回读仍是 `false` 时，用 `ShellExecuteExW("runas")` 启动自身的一个隐藏副本（`--kernel-start-elevated <pid>`），由它停掉旧内核、并按**那个内核自己的命令行**重新启动，然后重试。取消 UAC 没有任何副作用——终止旧内核发生在提权之后。
-- **提权副本只收一个 PID，并用退出码回传新内核的 PID**：映像路径和启动参数都由副本自己从那个进程读出来（`NtQueryInformationProcess`，提权之后连托盘读不到的提权内核也能读）。这既不会把启动参数猜错（`-d`/`-f`/`-ext-ctl` 一律原样保留），也不让副本变成"以管理员身份运行任意程序"的入口——它只接受映像名为 `mihomo.exe` 的进程。退出码 = 新内核 PID 为正，失败为负（`-2` 参数/不是内核、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行、`-7` `tray.yml` 里没有可启动的内核）；不走文件/管道回传，因为"由调用者指定路径"就等于给低权限进程一个让管理员写文件的口子。唯一例外是替换副本 `--kernel-replace-elevated <pid>`：它的活儿就是"换成 `tray.yml` 里的那个内核"，所以启动参数只能由它自己读 `tray.yml` 得到。
+- **提权副本自己从 PID 读映像，启动参数则由托盘给出**：映像路径由副本从那个进程读出来（`NtQueryInformationProcess`，提权之后连托盘读不到的提权内核也能读），所以副本永远不会"以管理员身份运行任意程序"——它只接受映像名为 `mihomo.exe` 的进程。启动参数（`--kernel-replace-elevated <pid> <参数…>`）来自托盘，因为托盘的 `tray.yml` 是唯一的配置来源，而提权副本以另一个账户运行时未必看得见它；换成副本自己读，反而会出现"两边读到不同配置"。退出码 = 新内核 PID 为正，失败为负（`-2` 参数/不是内核、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行）；不走文件/管道回传，因为"由调用者指定路径"就等于给低权限进程一个让管理员写文件的口子。
 - **内核身份按「记录的 PID → 路径身份」判定**：提权后托盘读不到那个进程的映像路径，所以后续操作以副本回传的 PID 为准；没有记录时才比路径，而且比较必须**归一化**（`canonicalize` + 忽略大小写）——scoop 的 `apps\<app>\current\mihomo.exe` 是 junction，进程报告的是解析后的 `apps\<app>\<版本>\mihomo.exe`，直接比字符串永远不相等（这正是"提权后内核停不掉"的根因）。
 - **本程序自己启动内核时总是显式传 `-d <配置目录> -f <配置文件>`**（都由 `tray.yml` 解析成绝对路径），所以内核读的就是这里读的那一份；提权副本可能以另一个账户运行，`%USERPROFILE%` 和 mihomo 自己的默认配置目录都会跟着变。`mihomo.args` 里的相对路径按 **mihomo.exe 所在目录**解析（启动时显式设了工作目录）。
 - **内核一旦提权就一直提权**（TUN 生效之后）：「退出并停止 Mihomo」会再弹一次 UAC，由提权副本按记录下来的 PID 结束它；取消则只提示「提权启动被取消或失败」，程序不退出。
@@ -133,7 +134,7 @@ ui:
 - **面板是本程序之外的东西**：「打开 Web 面板」只是把地址交给默认浏览器。要内核自己伺服一份静态面板，得在 mihomo 里配 `external-ui`（那份文件挂在控制器的 `/ui/` 下，正是默认地址）；用外部托管的面板（zashboard、metacubexd 等）则**不需要改 mihomo**，只要 `external-controller` 可达、在面板里填地址与 secret 即可——但那个页面与内核不同源时，mihomo 的 `external-controller-cors.allow-origins` 必须放行该来源，否则浏览器会拦在 CORS 上。控制器不可达时这一项与其他操作项一样灰显。
 - **「重启内核」与「强制重启内核」不是一回事**：
   - `重启内核` 是 `POST /restart`，内核自己换一个进程。内核先回 `{"status":"ok"}` 再关进程，所以响应成功不等于新内核已经应答——本程序清掉旧进程的记录（PID 与子句柄）、重新解析控制器，并在 5 s 内等它回话，超时报「内核重启后没有应答」。控制器有约 0.4 s 的不可用窗口，属正常。`embedMode` 的 CLI 内核没有这条路由，会报控制器错误。
-  - `强制重启内核` 是**另一个动作**：结束当前内核，按 `tray.yml` 重新拉起。设置只有在这一步才变得可知——命令行的东西在进程创建时就定死了，所以 `重启内核` 对"别人启动的内核"无能为力。它不需要控制器；没有内核在跑时灰显。内核不是本程序启动的（或映像读不出来）会先弹一次 Yes/No，默认按钮是「否」。提权的内核由提权副本 `--kernel-replace-elevated <pid>` 完成"停 + 起"（副本自己读 `tray.yml`，所以跨账户提权时只有 exe 旁的便携那份一定可见）。
+  - `强制重启内核` 是**另一个动作**：结束当前内核，按 `tray.yml` 重新拉起。设置只有在这一步才变得可知——命令行的东西在进程创建时就定死了，所以 `重启内核` 对"别人启动的内核"无能为力。它不需要控制器；没有内核在跑时灰显。内核不是本程序启动的（或映像读不出来）会先弹一次 Yes/No，默认按钮是「否」。提权的内核由提权副本 `--kernel-replace-elevated <pid> <参数…>` 完成"停 + 起"：映像沿用那个内核自己的（提权时读得到），配置与参数换成 `tray.yml` 解析出来的这一份。
   - 两者都**不清 `controller.*`**：它是"不动内核、只改连接目标"的兜底，清掉会让无控制器的机器失去退路。
 - **控制器只按明文 http 访问**：`controller.address` 写 `host:port` 或 `http://host:port` 都行。写 `https://host:port` 会被**明确拒绝**（菜单显示「控制器地址用了 https，本程序没有 TLS 客户端」），不会去掉前缀改按明文连——那会把明文请求发到一个只答 TLS 的端口上。控制器通常就在本机回环上；需要跨机加密时请自行套 SSH 隧道，或改用托管面板的 https 地址（那只影响浏览器，不影响本程序与内核之间的连接）。
 - Windows 11 默认把新的托盘图标收进溢出区，首次运行需要手动把它拖到任务栏固定。
@@ -145,7 +146,7 @@ ui:
 
 - **托盘自身不提权**：Go 版启动时就用 `ShellExecute("runas")` 把整个程序提权；这里托盘始终普通权限，只有 TUN 需要管理员，由一次性提权副本重启内核（见「已知行为」）。
 - **停止内核只结束本程序启动或路径匹配的实例**：Go 版用 `taskkill /IM mihomo.exe`，会误杀其他实例。
-- **内核与配置由 `tray.yml` 指明**：Go 版固定读 `%USERPROFILE%\.config\mihomo\config.yaml`、只在 PATH / 程序目录 / `~/scoop/shims` 找内核；这里 `mihomo.path` / `mihomo.home` / `mihomo.config` 是唯一来源，控制器则按 mihomo 自己的优先级解析（见「内核、配置与控制器来自哪里」）。
+- **内核与配置优先由 `tray.yml` 指明**：Go 版固定读 `%USERPROFILE%\.config\mihomo\config.yaml`、只在 PATH / 程序目录 / `~/scoop/shims` 找内核；这里 `mihomo.home` / `mihomo.config` 一旦填写就是唯一来源，留空时内核走自发现（程序目录 → PATH → Scoop，含捆绑布局的 `bin\`/`core\`），配置则按上面的顺序解析，控制器按 mihomo 自己的优先级解析（见「内核、配置与控制器来自哪里」）。
 - **新增**：代理分组子菜单（含 `URLTest`/`Fallback` 固定与取消固定）、「打开 Web 面板」、界面语言表与 `lang/*.yml`、可配轮询间隔（Go 版固定 5 s）、「更多」子菜单里的 `重载配置`/`关闭所有连接`（`DELETE /connections`）/`重启内核`（`POST /restart`）/`强制重启内核`（按 `tray.yml` 归一别人的内核）。
 - **同样不做**（相对 CFW 式图形客户端）：设置窗口、自绘弹窗、节点延迟色点、流量曲线、订阅刷新、脚本执行；需要图形化的设置就用内核自己的面板（菜单里的「打开 Web 面板」）。
 

@@ -126,16 +126,19 @@ SetMenuInfo(hmenu, &mi);
 
 ## 4. 内核、配置与控制器来自哪里
 
-**没有搜索、也没有探测**：三者都按 mihomo 自己的规则解析，认不出来就报错（报错里指名要改的那一项），而不是猜一个。
+**内核自发现，配置按 mihomo 自己的规则解析，但没有端口探测**：认不出来就报错（报错里指名要改的那一项），而不是猜一个。
 
 | 目标 | 顺序 |
 |---|---|
-| `mihomo.exe` | `tray.yml mihomo.path`（必填、绝对路径；不存在或相对路径 → 启动期报错） |
-| 配置目录 | `mihomo.home` → `mihomo.config` 所在目录 → mihomo 自己的默认 `%USERPROFILE%\.config\mihomo`（`XDG_CONFIG_HOME` 仅在该目录不存在时参与，条件与 mihomo 一致） |
-| 配置文件 | `mihomo.config` → `<配置目录>\config.yaml`（mihomo 对空 `-f` 的规则） |
+| `mihomo.exe` | `tray.yml mihomo.path`（填了就是它：不存在或相对路径 → 启动期报错，绝不回退到搜索）→ 自发现：本程序同目录（`mihomo.exe`、`bin\mihomo.exe`、`core\mihomo.exe`）→ `PATH` 每个目录 → Scoop（`%SCOOP%\apps\mihomo*\current`、`%SCOOP%\shims`、`~/scoop/shims`）。命中多个时优先真 binary，`proc::is_shim` 排除的是"同名启动器" |
+| 配置目录 | `mihomo.home` → `mihomo.config` 所在目录 → 内核带来的配置所在目录 → mihomo 自己的默认 `%USERPROFILE%\.config\mihomo`（`XDG_CONFIG_HOME` 仅在该目录不存在时参与，条件与 mihomo 一致） |
+| 配置文件 | `mihomo.config` →（`home` 非空）`<home>\config.yaml` → 内核带来的那份：内核在**本程序目录树**里（同目录或 `bin\`/`core\`）时先看本程序所在目录的 `config.yaml`，再看内核同目录的 `config.yaml` → mihomo 默认目录的 `config.yaml`。候选按**文件存在**挑选，都不存在就回落到默认路径（mihomo 对空 `-f` 的规则） |
 | 命令行 | 运行中那个内核自己的 argv：`-f`/`-d` 说明它读哪份文件；`-ext-ctl`/`-secret` 非空时覆盖配置文件（mihomo 的优先级）。同用户可读（`NtQueryInformationProcess`），提权内核读不到就跳过这一来源 |
 | controller | 上述 argv → `CLASH_OVERRIDE_EXTERNAL_CONTROLLER` / `CLASH_OVERRIDE_SECRET`（正是同名 flag 的默认值）→ 配置文件里的 `external-controller` / `secret` → `tray.yml controller.address` / `secret` |
 
+- **发现的答案钉一次**：启动时解析出的内核路径写进 `state::kernel_path`，停止内核、强制重启、身份判定（`pick_kernel`）全部复用它，不在中途重新搜索——否则"哪个内核是我的"会随 PATH 变化。
+- **不认领运行中的内核**：链条里没有"某个正在跑的 mihomo.exe"，把别人的内核变成自己的只有「强制重启」这一条路，而且会先问一次。
+- 自发现成功时状态行说明一次（`status.kernel_discovered`，一个轮询周期后清除）；链条全空才会报 `error.kernel_not_found`（文案点明可写 `mihomo.path`）。
 - **逐字段**：mihomo 侧某字段没设置或读不到，才用 `tray.yml` 的同名字段；`controller.*` 是兜底而非覆盖（旧实现反过来，会把内核的设置架空）。
 - 选哪个内核的 argv：被明确告知读**同一份配置文件**的那个；只有一个 `mihomo.exe` 时就是它；其余情况（多个、都读别的文件）不猜，直接跳过这一来源。相对 `-f`/`-d` 无法解析（要读别的进程的 CWD）→ 同样视为"不可知"。
 - 本程序启动内核时**总是**显式传 `-d`/`-f`（绝对路径），并拒绝 `mihomo.args` 里的 `-d`/`-f`/`-ext-ctl`/`-secret`（同一设置两处写法 → 内核与托盘读到的文件会不同）；工作目录设为 `mihomo.exe` 所在目录，让 args 里的相对路径有确定基准。环境里的 `CLASH_OVERRIDE_EXTERNAL_CONTROLLER`/`_SECRET` 同样在启动时**具体化成 `-ext-ctl`/`-secret`**（它们是这两个 flag 的默认值，写出来语义不变），因为 UAC 不传环境而提权副本只会复用命令行——这样 TUN 之后内核用的仍是这里解析出的那个控制器。
@@ -192,10 +195,10 @@ src/win/mod.rs              # 隐藏消息窗口、WM_APP 分发、TaskbarCreate
 src/win/menu.rs             # 菜单构建、id 表、TrackPopupMenuEx、深色模式
 src/win/proxy.rs            # 系统代理注册表 + InternetSetOptionW(39/37)
 src/win/autostart.rs        # HKCU Run
-src/win/elevate.rs          # 提权副本的参数（只有一个 PID）+ ShellExecuteExW("runas") + 等退出码
+src/win/elevate.rs          # 提权副本的参数（PID + 替换用的内核参数）+ ShellExecuteExW("runas") + 等退出码
 src/win/shell.rs            # ShellExecuteW：把 URL 交给默认浏览器
 src/mihomo/api.rs           # WinHTTP 客户端 + 上述端点
-src/mihomo/discover.rs      # §4 的来源解析（内核/配置/控制器）+ `-d`/`-f` 组装 + 运行内核 argv
+src/mihomo/discover.rs      # §4 的来源解析（内核自发现 + 配置/控制器）+ `-d`/`-f` 组装 + 运行内核 argv
 src/mihomo/proc.rs          # 启动/停止内核（只停路径匹配的 PID）+ 按 PID 读映像/命令行 + 提权副本主体
 src/paths.rs                # tray.yml 路径：`%NAME%` 按 cmd 展开，且必须绝对
 src/settings.rs             # tray.yml 读取（极简 YAML 子集）+ 模板（include_str! 仓库里的两份示例）
@@ -249,9 +252,9 @@ ui:
 - 图标四态（优先序）：TUN=蓝 > 系统代理开=橙 > 内核可用=绿 > 控制器不可达=灰。注册表说系统代理开着但内核不应答时仍是灰——那才是这一刻真正要看见的状态；「内核可用」和两种接管方式是三件事，所以三个颜色。
 - 控制器不可达：状态行 `控制器不可达`，模式/TUN/分组项灰显；不自动重启内核（避免和外部管理方式打架），仅当 `mihomo.auto_start` 且进程确实不存在时才拉起。
 - TUN 开启后回读仍为 `false` → 内核没有管理员权限：启动自身的提权副本（`--kernel-start-elevated <pid>`）重启内核后重试；再失败则 tooltip 提示「TUN 未生效（通常需要管理员权限）」。取消 UAC 报「提权启动被取消或失败」，且此时旧内核还没被终止。
-- 提权副本只接受一个 PID，绝不接受路径或参数：映像与命令行都从那个进程读（`NtQueryInformationProcess(ProcessCommandLineInformation)`，见 §5），并且要求映像名是 `mihomo.exe`。否则副本就等于一个"UAC 弹窗写着本程序、实际以管理员身份运行任意程序"的提权原语；顺带这样也永远不用重建内核的启动参数（`-d`/`-f`/`-ext-ctl` 原样继承）。读不到命令行时报「无法读取内核自己的启动参数，未重启内核」并放弃本次重启。**唯一例外**是替换助手 `--kernel-replace-elevated <pid>`：它的目的就是让内核换成"本程序会启动的那一个"，所以启动参数不可能来自被替换的进程；它改为**自己读 `tray.yml`**（`settings::settings_path()`），依然只收一个 PID。
+- 提权副本只从 PID 读**映像**，绝不接受调用方给的映像路径：映像与（start 模式的）命令行都从那个进程读（`NtQueryInformationProcess(ProcessCommandLineInformation)`，见 §5），并且要求映像名是 `mihomo.exe`。否则副本就等于一个"UAC 弹窗写着本程序、实际以管理员身份运行任意程序"的提权原语。读不到命令行时报「无法读取内核自己的启动参数，未重启内核」并放弃本次重启。**替换助手** `--kernel-replace-elevated <pid> <参数…>` 是唯一的例外，而且只在**参数**上例外：它的目的就是让内核换成"本程序会启动的那一个"，参数不可能来自被替换的进程；映像仍从 PID 读（所以提权场景下只换配置、不换 binary），参数由托盘给出——`tray.yml` 的唯一可读者是托盘（提权副本以另一个账户运行时未必看得见它），让它自己读反而会两边不一致。参数通道不是安全边界：能改 `tray.yml` 的攻击者本来就能让 mihomo 执行任意动作，把住的只能是映像通道。
 - 「更多」下的几件事不同（见 [RESTART_KERNEL.md](RESTART_KERNEL.md) §1）：`重载配置` 原地重读配置文件；`关闭所有连接` 让内核丢弃当前连接表（`DELETE /connections`，一次请求，连接随后由下一个请求重建）；`重启内核` 让内核自己换一个进程（argv/环境/令牌原样继承，提权保持，不需要 UAC，但"设置不可知"照旧）；`强制重启内核` 结束当前内核、按 `tray.yml` 拉起本程序自己的内核（设置从此可知）。前两者与重启内核需要控制器（无则灰显），强制重启只需要"有内核在跑"。
-- 强制重启的内核未必是本程序启动的，所以先认身份再动手：记录的 PID 或映像匹配 `mihomo.path` 才静默做；映像可读但不同（别人的内核）弹一次 Yes/No，写明映像与 PID（默认按钮是"否"）；映像读不出来（多半是提权内核）先问同样的问题，再由提权副本完成"停 + 起"——只停不启会让新内核丢掉那份额外权限。`taskkill /IM` 从不使用，只结束选中的那个进程及其启动器家族；启动前用进程列表确认旧内核真的没了，避免两个内核抢同一批端口。
+- 强制重启的内核未必是本程序启动的，所以先认身份再动手：记录的 PID 或映像匹配本程序解析出的内核（`mihomo.path`，或自发现命中的那个）才静默做；映像可读但不同（别人的内核）弹一次 Yes/No，写明映像与 PID（默认按钮是"否"）；映像读不出来（多半是提权内核）先问同样的问题，再由提权副本完成"停 + 起"——只停不启会让新内核丢掉那份额外权限。`taskkill /IM` 从不使用，只结束选中的那个进程及其启动器家族；启动前用进程列表确认旧内核真的没了，避免两个内核抢同一批端口。
 - 副本用**退出码**回答：启动成功 = 新内核的 PID（正数），失败 = 负数（`-2` 参数/不是内核、`-3` 停不干净、`-4` 启不来、`-5` 无权、`-6` 读不到命令行、`-7` `tray.yml` 里没有可启动的内核）；停止助手成功 = 0。之所以不用文件/管道：那需要把路径交给提权进程，低权限调用者就能借一次 UAC 让管理员写任意文件。
 - 托盘把回传的 PID 记进 `Snapshot.kernel_pid`，后续「退出并停止 Mihomo」直接用它（提权进程的映像路径读不出来，PID 是托盘唯一能持有的身份）；PID 不在进程列表里即作废。没有记录时才比路径。
 - 路径比较必须归一化（[proc.rs](../src/mihomo/proc.rs) `same_image`：`canonicalize` + 忽略大小写）。实测：scoop 的 `apps\mihomo-v3\current\mihomo.exe` 是 junction，进程报告的是 `apps\mihomo-v3\1.19.31\mihomo.exe`，字符串直接比较**永远不相等**——旧代码因此每次都靠"子句柄兜底"才能停掉非提权内核，而提权后子句柄已作废，于是托盘"成功退出"、提权内核留下。
@@ -296,7 +299,7 @@ ui:
 3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`（`Icons::new` 与 `TaskbarCreated` 重注册时各量一次，主显示器 DPI 变化后重画而不是沿用旧尺寸），无资源文件、无图像库。
 4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
 5. **实测体积/内存**：exe 329.0 KB（336,896 B；2026-09 体积复查后的数字，复查前 389.0 KB / 398,336 B，见本节「二进制体积复查」），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
-6. **单测 83 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"），图标层断言当前尺寸与 `SM_CXSMICON` 一致；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
+6. **单测 89 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"）、并断言托盘给提权副本的那条命令行经 `CommandLineToArgvW` 往返后逐字不变（含尾反斜杠与空参数），图标层断言当前尺寸与 `SM_CXSMICON` 一致；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板与内置英文表逐条一致、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言内核候选链的顺序与"真 binary 优先于 shim"、配置候选的顺序（捆绑根 → 内核同目录 → mihomo 默认）与存在性挑选、控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
 7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（62 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
    **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB，当时的数字），远高于动工前估的 3–4 KB——语言表本体、62 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（62 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
 
