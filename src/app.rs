@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -309,6 +309,10 @@ struct Startup {
     started_kernel: bool,
     /// Why the kernel could not be brought up, or why no controller is known.
     error: Option<String>,
+    /// What the status line says instead of "looking for the kernel" when nothing
+    /// was started here: which binary the discovery chain picked. Otherwise the
+    /// only way to find out is the process list.
+    note: Option<String>,
 }
 
 /// Bring the kernel up: say that it is being looked for, then look and start it.
@@ -328,7 +332,9 @@ fn startup(kernel: &KernelSlot, settings: &Settings, state: &Shared, hwnd: isize
     );
     let startup = look_for_kernel(kernel, settings);
     if !startup.started_kernel {
-        show_note(state, hwnd, None);
+        // Either the discovery chain's answer or nothing: a declaration needs no
+        // announcement, and a kernel started here has a note of its own.
+        show_note(state, hwnd, startup.note.clone());
     }
     startup
 }
@@ -336,23 +342,32 @@ fn startup(kernel: &KernelSlot, settings: &Settings, state: &Shared, hwnd: isize
 /// The startup itself, and the decision to start the kernel this program owns.
 fn look_for_kernel(kernel: &KernelSlot, settings: &Settings) -> Startup {
     // A path that is declared but unusable is a configuration problem, and it is
-    // reported as one: "not configured" and "configured wrongly" are different
+    // reported as one: "nothing found" and "configured wrongly" are different
     // answers, and neither is a search for whatever binary is around.
-    let path = discover::find_kernel(settings);
-    let path_error = path.as_ref().err().cloned();
-    let path = path.unwrap_or(None);
+    let found = discover::find_kernel(settings);
+    let path_error = found.as_ref().err().cloned();
+    let found = found.unwrap_or(None);
+    let note = match &found {
+        Some(discover::Kernel::Discovered(path)) => {
+            Some(i18n::t().status_kernel_discovered(&path.display().to_string()))
+        }
+        _ => None,
+    };
+    let path = found.map(|found| found.path().to_path_buf());
     // Recorded before anything runs: "exit and stop mihomo" matches the kernel it
     // may stop against this path, including one this program did not start.
     state::write_kernel_path(kernel, path.clone());
     // A controller that cannot be resolved is reported, but it does not stop the
     // kernel from being started: the system proxy and the elevated restart work
-    // without one.
-    let controller = discover::find_controller(settings);
+    // without one. The kernel is the one resolved above, so the configuration read
+    // here is the one that kernel would read.
+    let controller = discover::find_controller(settings, path.as_deref());
     let controller_error = controller.as_ref().err().cloned();
     let mut startup = Startup {
         client: controller.ok(),
         started_kernel: false,
         error: None,
+        note,
     };
     if let Some(error) = path_error {
         startup.error = Some(error);
@@ -371,7 +386,7 @@ fn look_for_kernel(kernel: &KernelSlot, settings: &Settings) -> Startup {
     if !proc::list_mihomo().is_empty() {
         return startup;
     }
-    let args = match discover::launch_args(settings) {
+    let args = match discover::launch_args(settings, Some(&path)) {
         Ok(args) => args,
         Err(error) => {
             startup.error = Some(error);
@@ -419,6 +434,12 @@ fn spawn_worker(
             // note stays up until it does, so a kernel that needs longer than the
             // budget does not look like a tray that never came up.
             let mut waiting_for_kernel = false;
+            // The note naming the kernel the discovery chain picked gets one poll
+            // interval on screen: long enough to read, and gone before it turns into
+            // a permanent line of the tooltip. `status_note` is a single slot, so the
+            // clear only happens while that note is still the one showing.
+            let discovery_note = startup.note;
+            let mut clear_note_at = discovery_note.is_some().then(|| Instant::now() + poll);
             // Nothing to wait for without a controller: "the kernel has not
             // answered" would be a claim about a question that was never asked,
             // and the controller error already says what is missing.
@@ -457,6 +478,14 @@ fn spawn_worker(
                     if snapshot.controller_ok || !snapshot.kernel_running {
                         show_note(&state, hwnd, None);
                         waiting_for_kernel = false;
+                    }
+                }
+                if let Some(deadline) = clear_note_at {
+                    if Instant::now() >= deadline {
+                        if state::read(&state).status_note.as_deref() == discovery_note.as_deref() {
+                            show_note(&state, hwnd, None);
+                        }
+                        clear_note_at = None;
                     }
                 }
                 match rx.recv_timeout(poll) {
@@ -539,7 +568,8 @@ fn restart_kernel(worker: &mut Worker) -> Option<String> {
     // up, and resolving it again is what notices. A resolution that fails keeps the
     // client that works, rather than turning a restart that succeeded into "no
     // controller". The answer is looked for on the client that is current now.
-    if let Ok(client) = discover::find_controller(worker.settings) {
+    let path = state::kernel_path(worker.kernel);
+    if let Ok(client) = discover::find_controller(worker.settings, path.as_deref()) {
         worker.client = Some(client);
     }
     let answered = wait_for_controller(worker.client.as_ref());
@@ -617,18 +647,25 @@ fn force_restart_kernel(worker: &mut Worker) -> Option<String> {
 
 /// The replacement itself, with the "what is going on" note already up.
 fn replace_kernel(worker: &mut Worker, path: &Path, picked: &proc::Process) -> Option<String> {
+    // The command line the replacement gets is resolved before anything is ended:
+    // a setting this program cannot use has to leave the running kernel alone
+    // rather than end it and then report that nothing can be started.
+    let args = match discover::launch_args(worker.settings, Some(path)) {
+        Ok(args) => args,
+        Err(error) => return Some(error),
+    };
     // A kernel whose image cannot be read runs with more rights than this process
     // has, so the helper is the only thing that can end it — and it has to start
     // the replacement as well, or the new kernel would come back without the rights
     // the old one had.
     if picked.denied {
-        return elevate_replacement(worker, picked.pid);
+        return elevate_replacement(worker, picked.pid, &args);
     }
     match proc::stop_kernel(Some(picked.pid), path) {
         Err(error) => return Some(error),
         // The image was readable and the permission to end it was not there: the
         // same answer as above, reached from the other side.
-        Ok(outcome) if outcome.denied > 0 => return elevate_replacement(worker, picked.pid),
+        Ok(outcome) if outcome.denied > 0 => return elevate_replacement(worker, picked.pid, &args),
         Ok(_) => {}
     }
     // A kernel that survived a stop which looked successful would end up next to
@@ -642,10 +679,6 @@ fn replace_kernel(worker: &mut Worker, path: &Path, picked: &proc::Process) -> O
     // The process is gone, so what was recorded for it is not evidence about the
     // kernel that is about to run.
     forget_kernel_process(worker);
-    let args = match discover::launch_args(worker.settings) {
-        Ok(args) => args,
-        Err(error) => return Some(error),
-    };
     match proc::start(path, &args) {
         Ok(child) => state::write_kernel_child(worker.kernel, child),
         Err(error) => return Some(error),
@@ -655,12 +688,15 @@ fn replace_kernel(worker: &mut Worker, path: &Path, picked: &proc::Process) -> O
 
 /// Have the elevated helper do both halves of the replacement.
 ///
-/// The helper is handed the PID of the kernel to end and nothing else: the image,
-/// the configuration and the arguments of the replacement are read by the helper
-/// itself, so it can never be talked into starting an image of the caller's
-/// choosing (`docs/ROADMAP.md`, hard constraint 9).
-fn elevate_replacement(worker: &mut Worker, pid: u32) -> Option<String> {
-    let params = win::elevate::kernel_replace_params(pid);
+/// The helper is handed the PID of the kernel to end and the command line the
+/// replacement is to be started with. The image is not in the message: the helper
+/// reads it from that process, so it can never be talked into starting an image of
+/// the caller's choosing (`docs/ROADMAP.md`, hard constraint 9). The arguments are
+/// handed in because they are the ones this program resolved from `tray.yml` — the
+/// copy runs under another account, where that settings file is not necessarily
+/// visible.
+fn elevate_replacement(worker: &mut Worker, pid: u32, args: &[String]) -> Option<String> {
+    let params = win::elevate::kernel_replace_params(pid, args);
     let code = match win::elevate::run_self_elevated(&params) {
         Ok(code) => code,
         Err(error) => return Some(error),
@@ -685,7 +721,8 @@ fn elevate_replacement(worker: &mut Worker, pid: u32) -> Option<String> {
 fn adopt_new_kernel(worker: &mut Worker) -> Option<String> {
     // A replacement may be how a new binary is picked up.
     worker.version.clear();
-    match discover::find_controller(worker.settings) {
+    let path = state::kernel_path(worker.kernel);
+    match discover::find_controller(worker.settings, path.as_deref()) {
         Ok(client) => worker.client = Some(client),
         // The kernel is up but there is nothing to ask it. Reporting why is more
         // useful than a replacement that reports success and cannot be used — and
@@ -821,7 +858,6 @@ fn helper_failure(code: i32) -> String {
         proc::HELPER_DENIED => messages.error_kernel_needs_admin.to_string(),
         proc::HELPER_UNREADABLE => messages.error_kernel_args.to_string(),
         proc::HELPER_NOT_STOPPED => messages.error_no_matching_kernel.to_string(),
-        proc::HELPER_NO_SETTINGS => messages.error_helper_settings.to_string(),
         _ => messages.error_elevated_kernel_failed.to_string(),
     }
 }

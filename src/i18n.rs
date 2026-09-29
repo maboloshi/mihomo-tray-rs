@@ -84,6 +84,7 @@ messages! {
     status_controller_unreachable => "status.controller_unreachable",
     status_stopped => "status.stopped",
     status_looking_kernel => "status.looking_kernel",
+    status_kernel_discovered_tpl => "status.kernel_discovered",
     status_starting_kernel => "status.starting_kernel",
     status_kernel_silent => "status.kernel_silent",
     status_restarting_kernel => "status.restarting_kernel",
@@ -133,7 +134,6 @@ messages! {
     error_kernel_needs_admin => "error.kernel_needs_admin",
     error_restart_kernel_silent => "error.restart_kernel_silent",
     error_kernel_still_running => "error.kernel_still_running",
-    error_helper_settings => "error.helper_settings",
 
     // Questions asked before something that cannot be undone.
     confirm_force_restart_tpl => "confirm.force_restart",
@@ -196,6 +196,12 @@ impl Messages {
 
     pub fn status_running(&self, mode: &str) -> String {
         self.fill(&self.status_running_tpl, &[("mode", mode)])
+    }
+
+    /// Which binary the discovery chain picked: said once at startup, because
+    /// nothing else on screen tells one `mihomo.exe` from another.
+    pub fn status_kernel_discovered(&self, path: &str) -> String {
+        self.fill(&self.status_kernel_discovered_tpl, &[("path", path)])
     }
 
     /// The question before a kernel this program did not start is replaced.
@@ -387,6 +393,7 @@ static ZH_CN: Messages = Messages {
     status_controller_unreachable: Cow::Borrowed("Mihomo 状态: 内核运行中，控制器不可达"),
     status_stopped: Cow::Borrowed("Mihomo 状态: 未运行"),
     status_looking_kernel: Cow::Borrowed("正在查找内核…"),
+    status_kernel_discovered_tpl: Cow::Borrowed("已自发现内核: {path}"),
     status_starting_kernel: Cow::Borrowed("正在启动内核…"),
     status_kernel_silent: Cow::Borrowed("内核尚未应答，仍在等待"),
     status_restarting_kernel: Cow::Borrowed("正在重启内核…"),
@@ -399,7 +406,9 @@ static ZH_CN: Messages = Messages {
     tooltip_proxy_tun_tpl: Cow::Borrowed("系统代理: {proxy} · TUN: {tun}"),
     tooltip_port_tpl: Cow::Borrowed("端口: {port}"),
 
-    error_kernel_not_found: Cow::Borrowed("未找到 mihomo.exe，请在 tray.yml 中设置 mihomo.path"),
+    error_kernel_not_found: Cow::Borrowed(
+        "没找到 mihomo.exe：程序目录、PATH、Scoop 里都没有；可在 tray.yml 中设置 mihomo.path",
+    ),
     error_path_not_absolute_tpl: Cow::Borrowed(
         "{field} 必须是绝对路径: {value}（%VAR% 展开后为 {expanded}）",
     ),
@@ -460,9 +469,6 @@ static ZH_CN: Messages = Messages {
     ),
     error_restart_kernel_silent: Cow::Borrowed("内核重启后没有应答"),
     error_kernel_still_running: Cow::Borrowed("内核没有停下来，没有按 tray.yml 启动新的内核"),
-    error_helper_settings: Cow::Borrowed(
-        "提权副本无法从 tray.yml 得到要启动的内核，未替换内核（只有 exe 旁的便携那份一定可见）",
-    ),
     confirm_image_unreadable: Cow::Borrowed("（映像无法读取）"),
 };
 
@@ -499,6 +505,7 @@ static EN_US: Messages = Messages {
     ),
     status_stopped: Cow::Borrowed("Mihomo status: not running"),
     status_looking_kernel: Cow::Borrowed("Looking for the kernel…"),
+    status_kernel_discovered_tpl: Cow::Borrowed("Kernel discovered: {path}"),
     status_starting_kernel: Cow::Borrowed("Starting the kernel…"),
     status_kernel_silent: Cow::Borrowed("The kernel has not answered yet; still waiting"),
     status_restarting_kernel: Cow::Borrowed("Restarting the kernel…"),
@@ -511,7 +518,9 @@ static EN_US: Messages = Messages {
     tooltip_proxy_tun_tpl: Cow::Borrowed("System proxy: {proxy} · TUN: {tun}"),
     tooltip_port_tpl: Cow::Borrowed("Port: {port}"),
 
-    error_kernel_not_found: Cow::Borrowed("mihomo.exe not found; set mihomo.path in tray.yml"),
+    error_kernel_not_found: Cow::Borrowed(
+        "No mihomo.exe found: not beside this program, not on PATH, not in scoop; set mihomo.path in tray.yml",
+    ),
     error_path_not_absolute_tpl: Cow::Borrowed(
         "{field} must be an absolute path: {value} (expanded to {expanded})",
     ),
@@ -592,11 +601,6 @@ static EN_US: Messages = Messages {
                  starts from tray.yml. Continue?",
     ),
     confirm_image_unreadable: Cow::Borrowed("(image cannot be read)"),
-    error_helper_settings: Cow::Borrowed(
-        "The elevated helper could not get the kernel to start from tray.yml, so the \
-                 kernel was not replaced (only the portable file next to the executable is \
-                 always visible)",
-    ),
 };
 
 static MESSAGES: OnceLock<&'static Messages> = OnceLock::new();

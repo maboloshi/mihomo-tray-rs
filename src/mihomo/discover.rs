@@ -1,14 +1,23 @@
 //! Where the kernel is, where its configuration is, and what that configuration
 //! says about the external controller.
 //!
-//! Nothing here searches. The kernel binary is what `mihomo.path` names, the
-//! configuration file is what `mihomo.config` or `mihomo.home` names (or mihomo's
-//! own default when neither does), and the controller is what the kernel itself
-//! says — its command line, its environment and that file, in mihomo's own order,
-//! with `tray.yml` only as the last resort. Guessing is what once made this
-//! program talk to a kernel it was not looking at, so a declaration that is
-//! missing or unusable is reported instead.
+//! The kernel binary is what `mihomo.path` names and otherwise the first hit of
+//! the discovery chain: this executable's own directory — `mihomo.exe` beside the
+//! tray, or in `bin\`/`core\`, which is how a bundled release is packed — then
+//! `PATH`, then scoop. mihomo itself searches for nothing: it is told `-d`/`-f` or
+//! falls back to its own directory, so a binary found here is always launched with
+//! absolute `-d` and `-f`, which is what keeps the kernel and this program reading
+//! the same files.
+//!
+//! A declared `mihomo.path` is answered as it stands: a path that is set and
+//! unusable is reported, never quietly replaced by whichever `mihomo.exe` the chain
+//! would have reached instead. The configuration file is what `mihomo.config` or
+//! `mihomo.home` names, else the one the kernel brings along — beside the tray that
+//! bundles it, else beside the kernel itself — else mihomo's own default. The
+//! controller is what the kernel itself says: its command line, its environment and
+//! that file, in mihomo's own order, with `tray.yml` only as the last resort.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::api::{Client, ClientError};
@@ -66,17 +75,134 @@ fn default_home() -> Option<PathBuf> {
     }
 }
 
-/// The kernel to start: what `mihomo.path` names.
+/// The kernel this program would start, and how it was named.
 ///
-/// `Ok(None)` is "not configured" — an empty setting, which the caller reports as
-/// such — while an error is a path that is configured and unusable. Both are
-/// answered rather than guessed at: a search would start whichever `mihomo.exe`
-/// it happened to find first.
-pub fn find_kernel(settings: &Settings) -> Result<Option<PathBuf>, String> {
-    if settings.mihomo_path.trim().is_empty() {
-        return Ok(None);
+/// The two are told apart because the status line says which binary the chain
+/// picked: a declaration is the user's own doing and needs no announcement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Kernel {
+    /// `tray.yml mihomo.path` named it.
+    Declared(PathBuf),
+    /// The discovery chain found it.
+    Discovered(PathBuf),
+}
+
+impl Kernel {
+    pub fn path(&self) -> &Path {
+        match self {
+            Kernel::Declared(path) | Kernel::Discovered(path) => path,
+        }
     }
-    paths::file("mihomo.path", &settings.mihomo_path).map(Some)
+}
+
+/// The kernel to start: what `mihomo.path` names, else the first hit of the
+/// discovery chain.
+///
+/// `Ok(None)` is "the chain found none", which the caller reports as not found —
+/// while an error is a declaration that is configured and unusable. The two are
+/// not interchangeable: a declared path that is missing is a mistake to fix, not a
+/// reason to start whichever `mihomo.exe` happens to be around.
+pub fn find_kernel(settings: &Settings) -> Result<Option<Kernel>, String> {
+    find_kernel_among(settings, &kernel_candidates())
+}
+
+/// The rule above, with the chain handed in — the caller produces it, so a test
+/// does not depend on where this machine keeps its kernels.
+fn find_kernel_among(
+    settings: &Settings,
+    candidates: &[PathBuf],
+) -> Result<Option<Kernel>, String> {
+    if !settings.mihomo_path.trim().is_empty() {
+        return paths::file("mihomo.path", &settings.mihomo_path)
+            .map(|path| Some(Kernel::Declared(path)));
+    }
+    Ok(found_kernel(candidates))
+}
+
+/// The first candidate that is a file, preferring a real binary over a scoop shim:
+/// the shim carries the kernel's name but is a launcher, so a kernel started from
+/// it reports an image the shim does not have.
+fn found_kernel(candidates: &[PathBuf]) -> Option<Kernel> {
+    let files: Vec<&PathBuf> = candidates.iter().filter(|path| path.is_file()).collect();
+    files
+        .iter()
+        .find(|path| !proc::is_shim(path))
+        .or_else(|| files.first())
+        .map(|path| Kernel::Discovered((*path).clone()))
+}
+
+/// This executable's own directory: where a bundled kernel lives.
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(Path::to_path_buf)
+}
+
+/// The candidate kernels, highest priority first: beside the tray (or in `bin\`,
+/// `core\`), then every `PATH` entry, then scoop.
+///
+/// Nothing here looks at a running process: a kernel this program did not start is
+/// not silently adopted. "Force restart" is the one action that replaces such a
+/// kernel, and it asks first.
+fn kernel_candidates() -> Vec<PathBuf> {
+    kernel_candidates_for(
+        exe_dir().as_deref(),
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("SCOOP").map(PathBuf::from).as_deref(),
+        home_dir().as_deref(),
+    )
+}
+
+/// The chain itself, with every place handed in. `PATH` is taken as the raw
+/// variable so a test can describe one without touching this machine's.
+fn kernel_candidates_for(
+    exe_dir: Option<&Path>,
+    path_var: Option<&OsStr>,
+    scoop: Option<&Path>,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dir) = exe_dir {
+        out.push(dir.join(proc::KERNEL_EXE));
+        out.push(dir.join("bin").join(proc::KERNEL_EXE));
+        out.push(dir.join("core").join(proc::KERNEL_EXE));
+    }
+    if let Some(path_var) = path_var {
+        for entry in std::env::split_paths(path_var) {
+            out.push(entry.join(proc::KERNEL_EXE));
+        }
+    }
+    if let Some(scoop) = scoop {
+        scoop_candidates(scoop, &mut out);
+        out.push(scoop.join("shims").join(proc::KERNEL_EXE));
+    }
+    if let Some(home) = home {
+        out.push(home.join("scoop").join("shims").join(proc::KERNEL_EXE));
+    }
+    out
+}
+
+/// `%SCOOP%\apps\mihomo*\current\mihomo.exe`: scoop keeps every version in a
+/// directory of its own and points `current` at the installed one. Sorted, so two
+/// installs of the same name do not make the answer depend on the file system.
+fn scoop_candidates(scoop: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(scoop.join("apps")) else {
+        return;
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("mihomo")
+        })
+        .map(|entry| entry.path().join("current").join(proc::KERNEL_EXE))
+        .collect();
+    found.sort();
+    out.extend(found);
 }
 
 /// The configuration file `mihomo.config` declares, if it declares one.
@@ -87,32 +213,89 @@ fn declared_config(settings: &Settings) -> Result<Option<PathBuf>, String> {
     paths::absolute("mihomo.config", &settings.mihomo_config).map(Some)
 }
 
-/// The kernel's configuration directory: `mihomo.home`, else the directory of the
-/// file `mihomo.config` names, else mihomo's own default.
-///
-/// `Ok(None)` means "not determinable" (`%USERPROFILE%` is not set), which leaves
-/// the kernel to its own default rather than inventing one.
-fn kernel_home(settings: &Settings) -> Result<Option<PathBuf>, String> {
-    if !settings.mihomo_home.trim().is_empty() {
-        return paths::absolute("mihomo.home", &settings.mihomo_home).map(Some);
+/// The configuration directory `mihomo.home` declares, if it declares one.
+fn declared_home(settings: &Settings) -> Result<Option<PathBuf>, String> {
+    if settings.mihomo_home.trim().is_empty() {
+        return Ok(None);
     }
-    if let Some(config) = declared_config(settings)? {
-        return Ok(config.parent().map(Path::to_path_buf));
-    }
-    Ok(default_home())
+    paths::absolute("mihomo.home", &settings.mihomo_home).map(Some)
 }
 
 /// The kernel's configuration file: `mihomo.config`, else `config.yaml` under
-/// [`kernel_home`] — the rule mihomo itself applies to an empty `-f`.
-fn kernel_config(settings: &Settings) -> Result<Option<PathBuf>, String> {
-    match declared_config(settings)? {
-        Some(config) => Ok(Some(config)),
-        None => Ok(kernel_home(settings)?.map(|home| home.join(CONFIG_FILE_NAME))),
+/// `mihomo.home`, else the file the kernel brings along, else `config.yaml` under
+/// mihomo's own default directory — the rule mihomo itself applies to an empty
+/// `-f`.
+fn kernel_config(settings: &Settings, kernel: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    kernel_config_with(settings, kernel, exe_dir().as_deref(), default_home())
+}
+
+/// The rule itself, with every place handed in: a test can describe a bundle, a
+/// kernel beside it and a home directory without touching this machine's.
+fn kernel_config_with(
+    settings: &Settings,
+    kernel: Option<&Path>,
+    exe_dir: Option<&Path>,
+    home: Option<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(config) = declared_config(settings)? {
+        return Ok(Some(config));
     }
+    if let Some(home) = declared_home(settings)? {
+        return Ok(Some(home.join(CONFIG_FILE_NAME)));
+    }
+    if let Some(config) = bundled_config(kernel, exe_dir) {
+        return Ok(Some(config));
+    }
+    Ok(home.map(|home| home.join(CONFIG_FILE_NAME)))
+}
+
+/// The kernel's configuration directory: `mihomo.home`, else the directory of the
+/// file its configuration came from.
+///
+/// `Ok(None)` means "not determinable" (`%USERPROFILE%` is not set), which leaves
+/// the kernel to its own default rather than inventing one.
+fn kernel_home(settings: &Settings, kernel: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    if let Some(home) = declared_home(settings)? {
+        return Ok(Some(home));
+    }
+    Ok(kernel_config(settings, kernel)?.and_then(|config| config.parent().map(Path::to_path_buf)))
+}
+
+/// The configuration file a kernel brings along: `<root>\config.yaml` when the
+/// kernel sits in this executable's own directory tree — the root of a bundle that
+/// is `mihomo-tray.exe` with `mihomo.exe` beside it, or in `bin\`/`core\` — and
+/// otherwise `config.yaml` beside the kernel itself.
+///
+/// Only a file that is really there counts: this is a candidate, not a claim, and
+/// mihomo's own default stays the answer when no such file exists.
+fn bundled_config(kernel: Option<&Path>, exe_dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = kernel?.parent()?;
+    if let Some(root) = exe_dir {
+        if is_beside(dir, root) {
+            let config = root.join(CONFIG_FILE_NAME);
+            if config.is_file() {
+                return Some(config);
+            }
+        }
+    }
+    let config = dir.join(CONFIG_FILE_NAME);
+    config.is_file().then_some(config)
+}
+
+/// Whether `dir` is `root` itself or one directory below it — the layouts a bundle
+/// uses. The comparison goes through [`proc::same_image`], so a junction, a
+/// different case and a short name all count as the same directory.
+fn is_beside(dir: &Path, root: &Path) -> bool {
+    proc::same_image(dir, root)
+        || dir
+            .parent()
+            .is_some_and(|parent| proc::same_image(parent, root))
 }
 
 /// The kernel's command line: what `tray.yml` declares, plus where its
-/// configuration lives.
+/// configuration lives. `kernel` is the binary this program would start, which the
+/// configuration candidates are resolved against — the same one the caller records
+/// for "exit and stop mihomo", so the two cannot disagree.
 ///
 /// `-d` and `-f` are always built from the resolved absolute paths, because
 /// mihomo resolves a relative one against the kernel's own working directory —
@@ -125,13 +308,17 @@ fn kernel_config(settings: &Settings) -> Result<Option<PathBuf>, String> {
 /// expanded the way cmd would. An argument that restates one of the settings
 /// owned by `tray.yml` is refused: the kernel would obey the argument while this
 /// program read the setting, and the two would disagree without saying so.
-pub fn launch_args(settings: &Settings) -> Result<Vec<String>, String> {
-    launch_args_with(settings, override_environment())
+pub fn launch_args(settings: &Settings, kernel: Option<&Path>) -> Result<Vec<String>, String> {
+    launch_args_with(settings, kernel, override_environment())
 }
 
 /// The command line itself, with the controller environment handed in — the
 /// caller reads it, so a test does not depend on this machine's variables.
-fn launch_args_with(settings: &Settings, env: ControllerSettings) -> Result<Vec<String>, String> {
+fn launch_args_with(
+    settings: &Settings,
+    kernel: Option<&Path>,
+    env: ControllerSettings,
+) -> Result<Vec<String>, String> {
     for (flag, field) in [
         ("d", "mihomo.home"),
         ("f", "mihomo.config"),
@@ -147,11 +334,11 @@ fn launch_args_with(settings: &Settings, env: ControllerSettings) -> Result<Vec<
         .iter()
         .map(|arg| paths::expand(arg))
         .collect();
-    if let Some(home) = kernel_home(settings)? {
+    if let Some(home) = kernel_home(settings, kernel)? {
         args.push("-d".to_string());
         args.push(home.display().to_string());
     }
-    if let Some(config) = kernel_config(settings)? {
+    if let Some(config) = kernel_config(settings, kernel)? {
         args.push("-f".to_string());
         args.push(config.display().to_string());
     }
@@ -238,17 +425,18 @@ fn controller_from_config(path: &Path) -> std::io::Result<ControllerFile> {
 /// settings, so the two cannot disagree. The environment is this process's, which
 /// is what a kernel started from here inherits; a kernel started elsewhere may
 /// have been given another one, and that is the one case this cannot see.
-pub fn find_controller(settings: &Settings) -> Result<Client, String> {
-    find_controller_with(settings, override_environment())
+pub fn find_controller(settings: &Settings, kernel: Option<&Path>) -> Result<Client, String> {
+    find_controller_with(settings, kernel, override_environment())
 }
 
 /// The resolution itself, with the controller environment handed in — the caller
 /// reads it, so a test does not depend on this machine's variables.
 fn find_controller_with(
     settings: &Settings,
+    kernel: Option<&Path>,
     from_env: ControllerSettings,
 ) -> Result<Client, String> {
-    let config = kernel_config(settings)?;
+    let config = kernel_config(settings, kernel)?;
     let args = kernel_arguments(config.as_deref());
     let file = config.as_deref().map(controller_from_config);
 
@@ -653,7 +841,7 @@ mod tests {
             controller_secret: "tok".into(),
             ..Settings::default()
         };
-        let client = find_controller_with(&settings, ControllerSettings::default()).unwrap();
+        let client = find_controller_with(&settings, None, ControllerSettings::default()).unwrap();
         assert_eq!(client.address(), "127.0.0.1:1234");
         assert_eq!(client.secret, "tok");
     }
@@ -665,7 +853,8 @@ mod tests {
             mihomo_config: path.display().to_string(),
             ..Settings::default()
         };
-        let error = find_controller_with(&settings, ControllerSettings::default()).unwrap_err();
+        let error =
+            find_controller_with(&settings, None, ControllerSettings::default()).unwrap_err();
         assert!(error.contains("external-controller"), "{error}");
     }
 
@@ -679,7 +868,8 @@ mod tests {
             mihomo_config: path.display().to_string(),
             ..Settings::default()
         };
-        let error = find_controller_with(&settings, ControllerSettings::default()).unwrap_err();
+        let error =
+            find_controller_with(&settings, None, ControllerSettings::default()).unwrap_err();
         assert!(error.contains("TLS/unix/pipe"), "{error}");
     }
 
@@ -693,7 +883,8 @@ mod tests {
             mihomo_config: path.display().to_string(),
             ..Settings::default()
         };
-        let error = find_controller_with(&settings, ControllerSettings::default()).unwrap_err();
+        let error =
+            find_controller_with(&settings, None, ControllerSettings::default()).unwrap_err();
         assert!(error.contains("https"), "{error}");
         assert!(!error.contains("host:port"), "{error}");
     }
@@ -708,9 +899,13 @@ mod tests {
     }
 
     #[test]
-    fn the_kernel_is_the_declared_one_and_nothing_else() {
-        // Nothing declared is "not configured", not a search.
-        assert!(find_kernel(&Settings::default()).unwrap().is_none());
+    fn the_kernel_is_the_declared_one_or_the_first_the_chain_finds() {
+        // An empty chain is "not found", which the caller reports as such.
+        assert!(
+            find_kernel_among(&Settings::default(), &[])
+                .unwrap()
+                .is_none()
+        );
 
         // A declared path that is not there is reported, not skipped: skipping is
         // what made a tray look like it could not find a kernel it was told about.
@@ -718,7 +913,7 @@ mod tests {
             mihomo_path: r"Z:\definitely\missing\mihomo.exe".into(),
             ..Settings::default()
         };
-        let error = find_kernel(&settings).unwrap_err();
+        let error = find_kernel_among(&settings, &[]).unwrap_err();
         assert!(error.contains("mihomo.path"), "{error}");
 
         // A relative path is refused before anything is opened.
@@ -726,7 +921,228 @@ mod tests {
             mihomo_path: r"scoop\apps\mihomo.exe".into(),
             ..Settings::default()
         };
-        assert!(find_kernel(&settings).unwrap_err().contains("mihomo.path"));
+        assert!(
+            find_kernel_among(&settings, &[])
+                .unwrap_err()
+                .contains("mihomo.path")
+        );
+    }
+
+    /// A chain of existing files, in the order the tests hand them in.
+    fn chain(dir: &Path, names: &[&str]) -> Vec<PathBuf> {
+        std::fs::create_dir_all(dir).unwrap();
+        names
+            .iter()
+            .map(|name| {
+                let file = dir.join(name);
+                std::fs::write(&file, "").unwrap();
+                file
+            })
+            .collect()
+    }
+
+    /// A file in a `shims` directory, which is what a scoop shim looks like: a
+    /// launcher that carries the kernel's name.
+    fn shim(dir: &Path) -> PathBuf {
+        let dir = dir.join("shims");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(proc::KERNEL_EXE);
+        std::fs::write(&file, "").unwrap();
+        file
+    }
+
+    #[test]
+    fn the_chain_takes_the_first_hit_and_prefers_a_real_binary() {
+        let dir = std::env::temp_dir().join("mihomo-tray-test-chain");
+        let _ = std::fs::remove_dir_all(&dir);
+        let found = chain(&dir, &["mihomo.exe", "second.exe"]);
+        let (beside, second) = (&found[0], &found[1]);
+        let launcher = shim(&dir);
+        assert!(proc::is_shim(&launcher));
+
+        // The first existing candidate wins.
+        assert_eq!(
+            found_kernel(&[beside.clone(), second.clone()]),
+            Some(Kernel::Discovered(beside.clone()))
+        );
+        // A candidate that is not there is skipped, not reported: the chain is a
+        // search, and only the whole chain coming up empty is "not found".
+        assert_eq!(
+            found_kernel(&[dir.join("absent.exe"), second.clone()]),
+            Some(Kernel::Discovered(second.clone()))
+        );
+        // A scoop shim is a launcher with the kernel's name, so a real binary later
+        // in the chain is preferred — a kernel started from the shim reports an
+        // image the shim does not have.
+        assert_eq!(
+            found_kernel(&[launcher.clone(), second.clone()]),
+            Some(Kernel::Discovered(second.clone()))
+        );
+        // A shim is still better than nothing.
+        assert_eq!(
+            found_kernel(std::slice::from_ref(&launcher)),
+            Some(Kernel::Discovered(launcher.clone()))
+        );
+        assert_eq!(found_kernel(&[]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_declared_kernel_is_not_searched_for() {
+        let dir = std::env::temp_dir().join("mihomo-tray-test-declared");
+        let found = chain(&dir, &["declared.exe", "found.exe"]);
+        let settings = Settings {
+            mihomo_path: found[0].display().to_string(),
+            ..Settings::default()
+        };
+        // The declaration is the answer even when the chain would find another
+        // one: this program starts what it was told to start.
+        assert_eq!(
+            find_kernel_among(&settings, &found).unwrap(),
+            Some(Kernel::Declared(found[0].clone()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_chain_looks_beside_the_tray_then_along_path_then_in_scoop() {
+        let path_var = std::env::join_paths([r"C:\first", r"C:\second"]).unwrap();
+        let candidates = kernel_candidates_for(
+            Some(Path::new(r"C:\tray")),
+            Some(&path_var),
+            Some(Path::new(r"C:\scoop")),
+            Some(Path::new(r"C:\Users\someone")),
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from(r"C:\tray\mihomo.exe"),
+                PathBuf::from(r"C:\tray\bin\mihomo.exe"),
+                PathBuf::from(r"C:\tray\core\mihomo.exe"),
+                PathBuf::from(r"C:\first\mihomo.exe"),
+                PathBuf::from(r"C:\second\mihomo.exe"),
+                PathBuf::from(r"C:\scoop\shims\mihomo.exe"),
+                PathBuf::from(r"C:\Users\someone\scoop\shims\mihomo.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn scoop_installs_are_found_through_their_current_link() {
+        let root = std::env::temp_dir().join("mihomo-tray-test-scoop");
+        let _ = std::fs::remove_dir_all(&root);
+        let installed = root
+            .join("apps")
+            .join("mihomo-v3")
+            .join("current")
+            .join(proc::KERNEL_EXE);
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("apps").join("other-app")).unwrap();
+        std::fs::write(&installed, "").unwrap();
+
+        let candidates = kernel_candidates_for(None, None, Some(&root), None);
+        // A real installed version comes before the shim that launches it, and an
+        // application that merely starts with `mihomo` is not mistaken for one.
+        assert_eq!(candidates.first(), Some(&installed));
+        assert_eq!(
+            candidates.last(),
+            Some(&root.join("shims").join(proc::KERNEL_EXE))
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.to_string_lossy().contains("other-app"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_kernel_in_the_bundle_root_brings_the_root_configuration() {
+        let root = std::env::temp_dir().join("mihomo-tray-test-bundle");
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let kernel = bin.join(proc::KERNEL_EXE);
+        std::fs::write(&kernel, "").unwrap();
+        let home = root.join("default-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let default_config = home.join("config.yaml");
+        std::fs::write(&default_config, "").unwrap();
+
+        // `mihomo.exe` in `bin\` with the configuration at the root of the bundle:
+        // the root wins, and `-d` becomes that root.
+        let root_config = root.join("config.yaml");
+        std::fs::write(&root_config, "").unwrap();
+        assert_eq!(
+            kernel_config_with(
+                &Settings::default(),
+                Some(&kernel),
+                Some(&root),
+                Some(home.clone())
+            )
+            .unwrap(),
+            Some(root_config.clone())
+        );
+
+        // Without one at the root, the file beside the kernel is the candidate.
+        std::fs::remove_file(&root_config).unwrap();
+        let beside = bin.join("config.yaml");
+        std::fs::write(&beside, "").unwrap();
+        assert_eq!(
+            kernel_config_with(
+                &Settings::default(),
+                Some(&kernel),
+                Some(&root),
+                Some(home.clone())
+            )
+            .unwrap(),
+            Some(beside.clone())
+        );
+
+        // Neither: mihomo's own default, exactly as if the kernel had not been
+        // found at all.
+        std::fs::remove_file(&beside).unwrap();
+        assert_eq!(
+            kernel_config_with(
+                &Settings::default(),
+                Some(&kernel),
+                Some(&root),
+                Some(home.clone())
+            )
+            .unwrap(),
+            Some(default_config.clone())
+        );
+
+        // A kernel elsewhere on the machine takes its own directory, never the
+        // tray's.
+        let elsewhere = std::env::temp_dir()
+            .join("mihomo-tray-test-bundle-elsewhere")
+            .join("mihomo.exe");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        std::fs::write(&elsewhere, "").unwrap();
+        assert_eq!(
+            kernel_config_with(
+                &Settings::default(),
+                Some(&elsewhere),
+                Some(&root),
+                Some(home.clone())
+            )
+            .unwrap(),
+            Some(default_config.clone())
+        );
+
+        // `mihomo.home` and `mihomo.config` still have the last word over all of
+        // it: the candidates are for an undeclared layout only.
+        let declared = Settings {
+            mihomo_home: home.display().to_string(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            kernel_config_with(&declared, Some(&kernel), Some(&root), Some(home.clone())).unwrap(),
+            Some(default_config.clone())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(elsewhere.parent().unwrap());
     }
 
     #[test]
@@ -738,7 +1154,7 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(
-            launch_args_with(&settings, ControllerSettings::default()).unwrap(),
+            launch_args_with(&settings, None, ControllerSettings::default()).unwrap(),
             vec![
                 "-m".to_string(),
                 "-d".to_string(),
@@ -758,7 +1174,7 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(
-            launch_args_with(&settings, ControllerSettings::default()).unwrap(),
+            launch_args_with(&settings, None, ControllerSettings::default()).unwrap(),
             vec![
                 "-d".to_string(),
                 dir.display().to_string(),
@@ -782,6 +1198,7 @@ mod tests {
         assert_eq!(
             launch_args_with(
                 &settings,
+                None,
                 source(Some("127.0.0.1:9095"), Some("testsecret")),
             )
             .unwrap(),
@@ -823,7 +1240,7 @@ mod tests {
                 mihomo_args: vec![flag.to_string()],
                 ..Settings::default()
             };
-            let error = launch_args(&settings).unwrap_err();
+            let error = launch_args(&settings, None).unwrap_err();
             // The report names the field to use instead, which is the useful half.
             assert!(error.contains(field), "{flag}: {error}");
         }
@@ -833,7 +1250,7 @@ mod tests {
             mihomo_args: vec!["-ext-ui=C:\\ui".to_string()],
             ..Settings::default()
         };
-        assert_eq!(launch_args(&settings).unwrap()[0], "-ext-ui=C:\\ui");
+        assert_eq!(launch_args(&settings, None).unwrap()[0], "-ext-ui=C:\\ui");
         let _ = std::fs::remove_file(&file);
     }
 }

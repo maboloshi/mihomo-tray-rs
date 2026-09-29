@@ -31,11 +31,10 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
 
 use crate::i18n;
-use crate::settings;
 
-use super::discover;
-
-const KERNEL_EXE: &str = "mihomo.exe";
+/// The kernel's file name: the one binary the discovery chain looks for, and the
+/// only image a helper may start.
+pub const KERNEL_EXE: &str = "mihomo.exe";
 /// `OpenProcess` failing with this is how a higher-integrity process says "not
 /// yours to look at"; anything else is a process that simply went away.
 const ERROR_ACCESS_DENIED: u32 = 5;
@@ -52,18 +51,19 @@ const TERMINATE_WAIT_MS: u32 = 5_000;
 /// rights over. `main` handles them before the single-instance guard, so the
 /// helper is a second process of this same binary.
 ///
-/// Every switch takes exactly one argument, the PID of the running `mihomo.exe`
-/// to work on. The image and the arguments of that kernel are read out of the
-/// process itself, never handed in on the command line: a helper that could be
-/// told which image to start would be a general "run this as administrator"
-/// primitive, and a kernel's own command line is also the only faithful source
-/// for flags that were never in `tray.yml` (an `-ext-ctl` on the command line,
-/// an unusual `-f`, and so on).
+/// Every switch takes the PID of the running `mihomo.exe` to work on first, and
+/// reads the kernel's image out of that process (`docs/ROADMAP.md`, hard constraint
+/// 9): a helper that could be told which image to start would be a general "run
+/// this as administrator" primitive. The start helper also takes the arguments from
+/// that process, which is the only faithful source for flags that were never in
+/// `tray.yml` (an `-ext-ctl` on the command line, an unusual `-f`, and so on).
 ///
 /// The replacing switch is the one exception to "the replacement is a copy of the
-/// running kernel", which is exactly what it is for: the replacement's image and
-/// arguments are the ones in `tray.yml`, read by the helper itself for the same
-/// reason.
+/// running kernel", which is exactly what it is for: the replacement's arguments
+/// are handed in by the tray, computed from `tray.yml` the same way the kernel the
+/// tray starts itself is — the elevated copy cannot compute them for itself,
+/// because the settings file lives under the invoking account's `%APPDATA%` and
+/// that is not necessarily visible to the account it runs as.
 pub const KERNEL_START_SWITCH: &str = "--kernel-start-elevated";
 pub const KERNEL_STOP_SWITCH: &str = "--kernel-stop-elevated";
 pub const KERNEL_REPLACE_SWITCH: &str = "--kernel-replace-elevated";
@@ -84,9 +84,6 @@ pub const HELPER_DENIED: i32 = -5;
 /// The kernel's own command line could not be read, so it cannot be restarted
 /// the way it was running.
 pub const HELPER_UNREADABLE: i32 = -6;
-/// `tray.yml` could not be read, or does not say which kernel to start: the
-/// replacing helper has nothing to start.
-pub const HELPER_NO_SETTINGS: i32 = -7;
 
 #[derive(Debug, Clone)]
 pub struct Process {
@@ -442,6 +439,24 @@ fn append_arg(line: &mut Vec<u16>, arg: &OsStr) {
     line.push('"' as u16);
 }
 
+/// `args` joined into one command line, quoted the way `CommandLineToArgvW` reads
+/// it back.
+///
+/// This is how the replacing helper is handed the kernel's arguments:
+/// `ShellExecuteExW` takes one string, so the argument boundaries have to survive
+/// the trip out and back — including a path that ends in a backslash, which is the
+/// case a hand-written `"…\"` quoting gets wrong.
+pub fn quoted_args(args: &[String]) -> String {
+    let mut line: Vec<u16> = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            line.push(' ' as u16);
+        }
+        append_arg(&mut line, OsStr::new(arg));
+    }
+    String::from_utf16_lossy(&line)
+}
+
 fn nul_terminated(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
@@ -640,14 +655,19 @@ pub fn stop_kernel_elevated(args: &[String]) -> i32 {
     }
 }
 
-/// Body of the replacing helper: `args` is `[kernel pid]`.
+/// Body of the replacing helper: `args` is `[kernel pid, kernel arguments…]`.
 ///
 /// The counterpart of [`start_kernel_elevated`], for the case that motivated it
 /// being different: the kernel that is running is not the one this program would
-/// start, so the replacement cannot be a copy of it. What to start is therefore
-/// read from `tray.yml` — by the helper itself, not handed in on the command line,
-/// which keeps it from being a way to have an arbitrary image started with
-/// administrator rights.
+/// start, so the replacement cannot be a copy of it.
+///
+/// The image is not in the arguments: it is the running kernel's own image, read
+/// from the process here, which is what keeps the helper from being a way to have
+/// an arbitrary image started with administrator rights. The arguments *are* handed
+/// in, because they are the ones the tray resolved from `tray.yml` — the
+/// configuration this program would start a kernel with — and the elevated copy
+/// cannot resolve them for itself: that settings file lives under the invoking
+/// account's `%APPDATA%`, which the elevated account does not necessarily see.
 ///
 /// Two processes are involved in the answer: the kernel that is ended and the one
 /// that is started, and only the helper has the rights for either. Success is the
@@ -660,19 +680,6 @@ pub fn replace_kernel_elevated(args: &[String]) -> i32 {
     let Some(exe) = kernel_image(pid) else {
         return HELPER_BAD_ARGS;
     };
-    // Read while the settings file is still there to be read: a layout the helper
-    // cannot see (`%APPDATA%` of another account) is a failure here rather than a
-    // kernel started from a half-known configuration.
-    let (settings, error) = settings::load(&settings::settings_path());
-    if error.is_some() {
-        return HELPER_NO_SETTINGS;
-    }
-    let (Ok(Some(path)), Ok(start_args)) = (
-        discover::find_kernel(&settings),
-        discover::launch_args(&settings),
-    ) else {
-        return HELPER_NO_SETTINGS;
-    };
     match stop_kernel(Some(pid), &exe) {
         Ok(outcome) if outcome.denied > 0 => return HELPER_NOT_STOPPED,
         Ok(_) => {}
@@ -683,7 +690,7 @@ pub fn replace_kernel_elevated(args: &[String]) -> i32 {
     if list_mihomo().iter().any(|process| process.pid == pid) {
         return HELPER_NOT_STOPPED;
     }
-    match start(&path, &start_args) {
+    match start(&exe, &args[1..]) {
         Ok(child) => i32::try_from(child.pid()).unwrap_or(HELPER_NOT_STARTED),
         Err(_) => HELPER_NOT_STARTED,
     }
@@ -1037,6 +1044,28 @@ mod tests {
         let parsed = parse_command_line(&String::from_utf16_lossy(&line[..line.len() - 1]));
         assert_eq!(parsed[0], r"C:\Program Files\mihomo\mihomo.exe");
         assert_eq!(parsed[1..], args);
+    }
+
+    #[test]
+    fn the_helpers_arguments_survive_the_trip_through_shell_execute() {
+        // The replacing helper is handed the kernel's whole argument list as one
+        // string in `ShellExecuteExW`'s parameters, and reads it back with the same
+        // parser: what it ends up starting has to be what the tray resolved. A path
+        // that ends in a backslash is where hand-written quoting goes wrong.
+        let args = [
+            "-d".to_string(),
+            r"C:\Program Files\mihomo\data".to_string(),
+            "-f".to_string(),
+            r"C:\trailing\".to_string(),
+            "-secret=with \"quotes\"".to_string(),
+            "空 格".to_string(),
+            String::new(),
+        ];
+        let line = quoted_args(&args);
+        assert_eq!(parse_command_line(&line), args, "{line}");
+        // No argument list at all is still one: the helper's own switch and PID
+        // stay the first two words of the parameters either way.
+        assert_eq!(quoted_args(&[]), String::new());
     }
 
     #[test]

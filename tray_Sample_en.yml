@@ -10,12 +10,17 @@
 # program starts is a directory nobody chose.
 
 mihomo:
-  path: ""             # mihomo.exe to start; required, absolute, e.g.
+  path: ""             # mihomo.exe to start; empty = discover it: beside this
+                       # program (and in bin\, core\), then on PATH, then in scoop.
+                       # When set it must be absolute, e.g.
                        # %USERPROFILE%\scoop\apps\mihomo\current\mihomo.exe
   home: ""             # mihomo's -d (configuration directory);
-                       # empty = the kernel's own default (%USERPROFILE%\.config\mihomo)
+                       # empty = the directory of the configuration the kernel brings
+                       # along, else the kernel's own default (%USERPROFILE%\.config\mihomo)
   config: ""           # mihomo's -f (configuration file);
-                       # empty = <home>\config.yaml when home is set
+                       # empty = <home>\config.yaml when home is set, else the
+                       # config.yaml beside the kernel (the one at the root of this
+                       # program's own directory when the kernel is bundled with it)
   args: []             # extra kernel arguments, passed through as written
                        # (%NAME% is expanded here too)
   auto_start: true     # start the kernel on launch when it is not running

@@ -8,12 +8,16 @@
 # 选择过的。
 
 mihomo:
-  path: ""             # 要启动的 mihomo.exe；必填、绝对路径，例如
-                       # %USERPROFILE%\scoop\apps\mihomo\current\mihomo.exe
+  path: ""             # 要启动的 mihomo.exe；留空 = 自发现：先找本程序同目录
+                       # （含 bin\、core\），再找 PATH，最后找 Scoop。填写时必须是
+                       # 绝对路径，例如 %USERPROFILE%\scoop\apps\mihomo\current\mihomo.exe
   home: ""             # mihomo 的 -d（配置目录）；
-                       # 留空 = 用内核自己的默认目录（%USERPROFILE%\.config\mihomo）
+                       # 留空 = 用内核带来的那份配置所在目录，都没有才用内核默认目录
+                       # （%USERPROFILE%\.config\mihomo）
   config: ""           # mihomo 的 -f（配置文件）；
                        # 留空且 home 非空 = <home>\config.yaml
+                       # 留空且 home 也留空 = 与内核同目录的 config.yaml（捆绑布局下先看
+                       # 本程序所在目录的 config.yaml），都没有才用 mihomo 默认目录
   args: []             # 额外的内核启动参数，原样透传（其中的 %NAME% 也会展开）
   auto_start: true     # 启动本程序时，若内核没在运行就把它启动起来
 

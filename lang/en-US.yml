@@ -45,6 +45,7 @@ status:
   controller_unreachable: "Mihomo status: kernel running, controller unreachable"
   stopped: "Mihomo status: not running"
   looking_kernel: "Looking for the kernel…"
+  kernel_discovered: "Kernel discovered: {path}"
   starting_kernel: "Starting the kernel…"
   kernel_silent: "The kernel has not answered yet; still waiting"
   restarting_kernel: "Restarting the kernel…"
@@ -62,7 +63,7 @@ tooltip:
   port: "Port: {port}"
 
 error:
-  kernel_not_found: "mihomo.exe not found; set mihomo.path in tray.yml"
+  kernel_not_found: "No mihomo.exe found: not beside this program, not on PATH, not in scoop; set mihomo.path in tray.yml"
   path_not_absolute: "{field} must be an absolute path: {value} (expanded to {expanded})"
   path_missing: "{field} points at a path that does not exist: {path}"
   flag_in_args: "Do not put {flag} in mihomo.args; use {field} — one setting in two places is how the kernel and this program end up reading different files"
@@ -98,7 +99,6 @@ error:
   kernel_needs_admin: "The kernel runs with administrator rights and cannot be stopped by this program"
   restart_kernel_silent: "The kernel did not answer after the restart"
   kernel_still_running: "The kernel did not stop, so the one from tray.yml was not started"
-  helper_settings: "The elevated helper could not get the kernel to start from tray.yml, so the kernel was not replaced (only the portable file next to the executable is always visible)"
   kernel_args: "Could not read the kernel's own command line, so it was not restarted"
   message_window: Failed to create the message window
   open_web_ui: "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})"

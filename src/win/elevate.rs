@@ -1,12 +1,13 @@
 //! Elevation: TUN needs administrator rights, the tray itself does not.
 //!
 //! The privileged work happens in a short-lived copy of this same executable
-//! (`mihomo::proc::KERNEL_START_SWITCH` / `KERNEL_STOP_SWITCH`): it is handed the
-//! PID of the running kernel, stops it, and starts a replacement from that
-//! kernel's own image and command line — or only stops it. A cancelled UAC prompt
-//! therefore leaves everything as it was: nothing has been killed yet at that
-//! point. The PID is the only thing passed along, so a helper can never be talked
-//! into starting an image of somebody else's choosing.
+//! (`mihomo::proc::KERNEL_START_SWITCH` / `KERNEL_STOP_SWITCH` /
+//! `KERNEL_REPLACE_SWITCH`): it is handed the PID of the running kernel, stops it,
+//! and starts a replacement — or only stops it. A cancelled UAC prompt therefore
+//! leaves everything as it was: nothing has been killed yet at that point. No
+//! helper is ever handed an image path: what it starts is read from the process
+//! named by the PID, so a helper can never be talked into starting an image of
+//! somebody else's choosing.
 //!
 //! Nothing privileged is ever driven from the tray process: it only launches the
 //! helper and waits for it to exit.
@@ -47,14 +48,21 @@ pub fn kernel_stop_params(pid: u32) -> String {
     format!("{} {pid}", proc::KERNEL_STOP_SWITCH)
 }
 
-/// The helper's parameters for replacing a kernel the tray has no rights over.
+/// The helper's parameters for replacing a kernel the tray has no rights over: the
+/// kernel's PID, then the command line its replacement is to be started with.
 ///
-/// The PID is the whole message, as everywhere else. What to start cannot come
-/// from here even in principle: the point of this helper is that the running
-/// kernel's command line is *not* the one this program would use, so the helper
-/// reads `tray.yml` itself.
-pub fn kernel_replace_params(pid: u32) -> String {
-    format!("{} {pid}", proc::KERNEL_REPLACE_SWITCH)
+/// The image is not in the message, here or anywhere else: the helper reads it out
+/// of the process the PID names. The arguments come from the tray because this
+/// helper's point is that the running kernel's command line is *not* the one this
+/// program would use — and the tray is the one process that has the settings file
+/// in front of it (`%APPDATA%` of the invoking account is not necessarily visible
+/// to the account the copy runs as).
+pub fn kernel_replace_params(pid: u32, args: &[String]) -> String {
+    format!(
+        "{} {pid} {}",
+        proc::KERNEL_REPLACE_SWITCH,
+        proc::quoted_args(args)
+    )
 }
 
 /// Run this executable again through the UAC prompt and wait for it to finish.

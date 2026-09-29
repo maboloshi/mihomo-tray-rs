@@ -16,12 +16,16 @@ pub enum DarkMenu {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
+    /// The kernel to start. Empty means "find it": the discovery chain looks beside
+    /// this executable, then on `PATH`, then in scoop (`discover::find_kernel`).
     pub mihomo_path: String,
     /// mihomo's `-d`: the directory its configuration, cache and geodata live in.
-    /// Empty means the kernel's own default, which mihomo documents as
+    /// Empty means the directory of the configuration file the kernel brings along
+    /// — or the kernel's own default, which mihomo documents as
     /// `%USERPROFILE%\.config\mihomo`.
     pub mihomo_home: String,
     pub mihomo_args: Vec<String>,
+    /// mihomo's `-f`. Empty means `config.yaml` under the home directory above.
     pub mihomo_config: String,
     pub mihomo_auto_start: bool,
     pub controller_address: String,
