@@ -316,7 +316,7 @@ ui:
 
 结果：exe 398,336 B → **336,896 B（−60.0 KiB，−15.4%）**，`.text` 291.0 → 239.5 KiB。仍高于 §2 的 250 KB 预算（那条是 Phase 0 的选型预算）。
 
-复查顺带记下、**本轮未处理**的几项，都属于便宜且独立的小改动：`Cargo.toml` 开了 `Win32_Security` 而源码零引用；`Cargo.lock` 里 `serde`/`serde_derive`/`syn`/`quote`/`proc-macro2`/`unicode-ident` 不在解析图内（`cargo tree` 只有 `serde_json → itoa/memchr/serde_core/zmij`）；`win/{mod,elevate,menu,shell}.rs` 各带一份 `wide()`；`std::env::var`（18 处）会把 `to_lowercase`（3.9 KiB）链进来，换 `GetEnvironmentVariableW` 可去掉。另有一项既有失败：`cargo test`（debug）下 `icon.rs:109` 的 `color * 3` u8 溢出使图标那项失败，`--release` 全绿——与本次改动无关，主树同样失败。（`lang/en-US.yml` 曾在列表里，现已由 `build.rs` 生成，见本节 §7。）
+复查顺带记下、**本轮未处理**的几项，都属于便宜且独立的小改动：`Cargo.toml` 的 `Win32_Security` 实际被 `src/mihomo/proc.rs`（`SECURITY_ATTRIBUTES`，用于 `CreateFileW` 与进程启动）引用，不可删；`Cargo.lock` 里 `serde_derive`/`proc-macro2`/`syn`/`quote`/`unicode-ident` 仍由 `serde_core`（`serde_json` 依赖链）拉入构建图，不能单独去掉；`win/{mod,elevate,menu,shell}.rs` 各带一份 `wide()`；`std::env::var`（18 处）会把 `to_lowercase`（3.9 KiB）链进来，换 `GetEnvironmentVariableW` 可去掉。另有一项既有失败：`cargo test`（debug）下 `icon.rs:109` 的 `color * 3` u8 溢出使图标那项失败，`--release` 全绿——与本次改动无关，主树同样失败。（`lang/en-US.yml` 曾在列表里，现已由 `build.rs` 生成，见本节 §7。）
 
 ### 代码审查修复（第二轮，10 项 must-fix + 若干 should-fix）
 
