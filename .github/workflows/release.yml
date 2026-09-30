@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Prepare tray.yml (from sample)
+        shell: pwsh
+        run: |
+          # Use the Chinese sample as default base; change to tray_Sample_en.yml if needed.
+          Copy-Item assets\tray_Sample_zh.yml tray.yml
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zipName = "mihomo-tray-${tag}-win-x64.zip"
+          Compress-Archive -Path @("target\release\mihomo-tray.exe"; "assets\mihomo-cat.ico"; "tray.yml") -DestinationPath $zipName -Force
+          Write-Host "Created $zipName"
+
+      - name: Create GitHub Release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mihomo-tray-*.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
