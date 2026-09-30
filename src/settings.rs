@@ -79,8 +79,8 @@ impl Default for Settings {
 /// every message falls back to.
 pub fn default_file(language: &str) -> &'static str {
     match language {
-        "zh" => include_str!("../tray_Sample_zh.yml"),
-        _ => include_str!("../tray_Sample_en.yml"),
+        "zh" => include_str!("../assets/tray_Sample_zh.yml"),
+        _ => include_str!("../assets/tray_Sample_en.yml"),
     }
 }
 
