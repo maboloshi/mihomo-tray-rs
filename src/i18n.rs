@@ -74,6 +74,9 @@ messages! {
     menu_restart_kernel => "menu.restart_kernel",
     menu_force_restart_kernel => "menu.force_restart_kernel",
     menu_web_ui => "menu.web_ui",
+    menu_speed_test => "menu.speed_test",
+    menu_member_delay_tpl => "menu.member_delay",
+    menu_member_timeout_tpl => "menu.member_timeout",
     menu_more => "menu.more",
     menu_exit => "menu.exit",
     menu_exit_stop_kernel => "menu.exit_stop_kernel",
@@ -91,6 +94,7 @@ messages! {
     status_force_restarting => "status.force_restarting",
     status_elevating_kernel => "status.elevating_kernel",
     status_elevating_stop => "status.elevating_stop",
+    status_speed_testing_tpl => "status.speed_testing",
     state_on => "state.on",
     state_off => "state.off",
     tooltip_kernel_tpl => "tooltip.kernel",
@@ -192,6 +196,26 @@ impl Messages {
             &self.menu_group_label_pinned_tpl,
             &[("name", name), ("kind", kind)],
         )
+    }
+
+    /// A node in a group submenu, with the latency the kernel last measured for
+    /// it. `timeout` is the kernel's `0`: a test that did not come back, said in
+    /// words rather than as a plausible-looking `0ms`.
+    pub fn menu_member_delay(&self, name: &str, ms: u32) -> String {
+        self.fill(
+            &self.menu_member_delay_tpl,
+            &[("name", name), ("ms", &ms.to_string())],
+        )
+    }
+
+    pub fn menu_member_timeout(&self, name: &str) -> String {
+        self.fill(&self.menu_member_timeout_tpl, &[("name", name)])
+    }
+
+    /// A group test is synchronous and takes seconds, so the status line says
+    /// what is running while it does.
+    pub fn status_speed_testing(&self, group: &str) -> String {
+        self.fill(&self.status_speed_testing_tpl, &[("group", group)])
     }
 
     pub fn status_running(&self, mode: &str) -> String {
@@ -384,6 +408,9 @@ static ZH_CN: Messages = Messages {
     menu_restart_kernel: Cow::Borrowed("重启内核"),
     menu_force_restart_kernel: Cow::Borrowed("强制重启内核"),
     menu_web_ui: Cow::Borrowed("打开 Web 面板"),
+    menu_speed_test: Cow::Borrowed("测速本组节点"),
+    menu_member_delay_tpl: Cow::Borrowed("{name} ({ms}ms)"),
+    menu_member_timeout_tpl: Cow::Borrowed("{name} (超时)"),
     menu_more: Cow::Borrowed("更多"),
     menu_exit: Cow::Borrowed("退出"),
     menu_exit_stop_kernel: Cow::Borrowed("退出并停止 Mihomo"),
@@ -400,6 +427,7 @@ static ZH_CN: Messages = Messages {
     status_force_restarting: Cow::Borrowed("正在停止内核，并按 tray.yml 重新启动…"),
     status_elevating_kernel: Cow::Borrowed("正在以管理员身份重启内核…"),
     status_elevating_stop: Cow::Borrowed("正在以管理员权限停止内核…"),
+    status_speed_testing_tpl: Cow::Borrowed("正在测速 {group}…"),
     state_on: Cow::Borrowed("开"),
     state_off: Cow::Borrowed("关"),
     tooltip_kernel_tpl: Cow::Borrowed("内核: mihomo {version}"),
@@ -495,6 +523,9 @@ static EN_US: Messages = Messages {
     menu_restart_kernel: Cow::Borrowed("Restart kernel"),
     menu_force_restart_kernel: Cow::Borrowed("Force restart kernel"),
     menu_web_ui: Cow::Borrowed("Open web dashboard"),
+    menu_speed_test: Cow::Borrowed("Speed-test this group"),
+    menu_member_delay_tpl: Cow::Borrowed("{name} ({ms}ms)"),
+    menu_member_timeout_tpl: Cow::Borrowed("{name} (timeout)"),
     menu_more: Cow::Borrowed("More"),
     menu_exit: Cow::Borrowed("Exit"),
     menu_exit_stop_kernel: Cow::Borrowed("Exit and stop Mihomo"),
@@ -513,6 +544,7 @@ static EN_US: Messages = Messages {
     status_force_restarting: Cow::Borrowed("Stopping the kernel and starting it from tray.yml…"),
     status_elevating_kernel: Cow::Borrowed("Restarting the kernel as administrator…"),
     status_elevating_stop: Cow::Borrowed("Stopping the kernel as administrator…"),
+    status_speed_testing_tpl: Cow::Borrowed("Speed-testing {group}…"),
     state_on: Cow::Borrowed("on"),
     state_off: Cow::Borrowed("off"),
     tooltip_kernel_tpl: Cow::Borrowed("Kernel: mihomo {version}"),

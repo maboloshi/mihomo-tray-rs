@@ -37,6 +37,8 @@ pub enum Command {
     ForceRestartKernel,
     /// Ask for the rights to stop a kernel that is not ours to end.
     StopKernelElevated,
+    /// Measure node latency (`GET /group/{name}/delay`).
+    SpeedTest(String),
     /// Re-read everything (used after actions handled on the UI thread).
     Refresh,
 }
@@ -168,6 +170,7 @@ impl App {
             // The kernel is replaced by this process, so nothing about it needs the
             // controller: the command runs even when none could be resolved.
             Action::ForceRestartKernel => self.send(Command::ForceRestartKernel),
+            Action::SpeedTest(group) => self.send(Command::SpeedTest(group.clone())),
             Action::OpenWebUi => {
                 // The entry is only clickable while the controller answers, and
                 // the refresh that proves that is the one that published this
@@ -279,6 +282,21 @@ const KERNEL_START_BUDGET: Duration = Duration::from_secs(10);
 
 /// How long a kernel this program started gets to answer the controller.
 const KERNEL_STARTUP_BUDGET: Duration = Duration::from_secs(5);
+
+/// How long a group test may take from this side.
+///
+/// `GET /group/{name}/delay` is synchronous and walks the group's members one at
+/// a time, each with the per-node timeout the request asks for (3 s, see
+/// `api::DELAY_QUERY_TIMEOUT_MS`), so the sum is what has to fit — not the
+/// controller's ordinary request timeout, which is an order of magnitude
+/// smaller and would report a failed request for a test that is still running.
+const DELAY_TEST_TIMEOUT_MS: u32 = 30_000;
+
+/// What a group test probes. mihomo's own default and the URL its panels use:
+/// an endpoint that answers `204` with no body, so the measurement is the
+/// connection, not a page transfer. Not configurable yet; if it ever needs to
+/// be, it belongs next to `ui.web_url` in `tray.yml`.
+const DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
 
 /// Everything an action needs besides the command itself.
 struct Worker<'a> {
@@ -525,6 +543,28 @@ fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
         Command::CloseConnections => client.close_connections(),
         Command::StopKernelElevated => return stop_kernel_elevated(worker),
         Command::Refresh => Ok(()),
+        // A group test walks every member at its own timeout, so it needs a
+        // request budget of its own: the configured one is sized for single
+        // requests and would cut the answer off in the middle of the test.
+        //
+        // Nothing about the result is published here. The measurements land in
+        // each node's `history` inside the kernel, and the refresh that follows
+        // reads them back through `/proxies` — so the numbers survive on their
+        // own and there is no second copy of them to go stale.
+        Command::SpeedTest(group) => {
+            let probe = Client {
+                timeout_ms: DELAY_TEST_TIMEOUT_MS,
+                ..client.clone()
+            };
+            show_note(
+                worker.state,
+                worker.hwnd,
+                Some(i18n::t().status_speed_testing(group)),
+            );
+            let result = probe.delay(group, DELAY_TEST_URL);
+            show_note(worker.state, worker.hwnd, None);
+            result
+        }
         // Handled before this point, so that the client can be replaced while it
         // happens.
         Command::RestartKernel => Ok(()),

@@ -33,6 +33,8 @@ pub enum Action {
     RestartKernel,
     /// End the running kernel and start the one `tray.yml` describes.
     ForceRestartKernel,
+    /// Measure node latency for a group (`GET /group/{name}/delay`).
+    SpeedTest(String),
     /// Open the kernel's dashboard (or a hosted one pointed at it) in the
     /// browser. The tray itself has no settings window, so this is where the
     /// rest of mihomo is configured.
@@ -252,6 +254,23 @@ fn add_members(
     path: &mut Vec<String>,
     settings: &Settings,
 ) {
+    // Measuring is a property of this group, so it belongs in the group's own
+    // submenu rather than in a menu-wide entry that would have to guess which
+    // group the user meant. Only there: a nested group is already listed under
+    // "proxy groups" with a row of its own, and repeating this row at every
+    // nesting level would spend the item budget on itself.
+    let mut has_tools = false;
+    if depth == 0 && snapshot.controller_ok && !group.members.is_empty() && !builder.out_of_budget()
+    {
+        builder.item(
+            menu,
+            &i18n::t().menu_speed_test,
+            Action::SpeedTest(group.name.clone()),
+            false,
+            true,
+        );
+        has_tools = true;
+    }
     // A pinned URLTest/Fallback stops choosing for itself, so the way back to
     // automatic selection has to be offered explicitly.
     if !group.fixed.is_empty() && !builder.out_of_budget() {
@@ -262,11 +281,21 @@ fn add_members(
             false,
             true,
         );
+        has_tools = true;
+    }
+    if has_tools {
         builder.separator(menu);
     }
+    // Latency only reorders a list that has been measured: mihomo's `all` array
+    // is the order the configuration asked for, and reordering that because the
+    // kernel has no `history` yet would be a change nobody asked for.
+    let mut entries = member_entries(group);
+    if entries.iter().any(|(_, delay)| delay.is_some()) {
+        sort_by_delay(&mut entries);
+    }
     let page_size = settings.groups_page_size;
-    if page_size > 0 && group.members.len() > page_size && depth == 0 {
-        for (index, chunk) in group.members.chunks(page_size).enumerate() {
+    if page_size > 0 && entries.len() > page_size && depth == 0 {
+        for (index, chunk) in entries.chunks(page_size).enumerate() {
             let first = index * page_size + 1;
             let last = first + chunk.len() - 1;
             let page = builder.new_menu();
@@ -276,15 +305,50 @@ fn add_members(
         return;
     }
     add_member_list(
-        builder,
-        menu,
-        snapshot,
-        group,
-        depth,
-        path,
-        settings,
-        &group.members,
+        builder, menu, snapshot, group, depth, path, settings, &entries,
     );
+}
+
+/// The group's members paired with the latency `/proxies` reports for each,
+/// index-aligned through [`Group::delays`].
+fn member_entries(group: &Group) -> Vec<(String, Option<u32>)> {
+    group
+        .members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| (member.clone(), group.delays.get(index).copied().flatten()))
+        .collect()
+}
+
+/// Where a member sorts. Measured nodes come first, fastest first; a node the
+/// kernel never tested and one whose test timed out share the last place —
+/// neither is a latency, so ordering one above the other would be invented, and
+/// the order the kernel reported is kept among equals.
+fn delay_key(delay: Option<u32>) -> u32 {
+    match delay {
+        Some(ms) if ms > 0 => ms,
+        _ => u32::MAX,
+    }
+}
+
+/// Stable insertion sort by [`delay_key`].
+///
+/// Hand-written rather than `slice::sort_by_key`, which would be the obvious
+/// call: the standard library's stable sort is a large generic function that is
+/// instantiated once per element type, and `ordered_groups` already pays for one
+/// of those. A second instantiation measures around 4 KiB in a binary whose size
+/// is part of its design (`docs/DESIGN.md` §2), while a group holds a handful of
+/// nodes — the quadratic worst case here is a few thousand comparisons inside
+/// the `MAX_ITEMS` menu budget. Equal keys keep their original relative order,
+/// so an unmeasured tail stays exactly as mihomo reported it.
+fn sort_by_delay(entries: &mut [(String, Option<u32>)]) {
+    for index in 1..entries.len() {
+        let mut position = index;
+        while position > 0 && delay_key(entries[position].1) < delay_key(entries[position - 1].1) {
+            entries.swap(position - 1, position);
+            position -= 1;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -296,13 +360,13 @@ fn add_member_list(
     depth: usize,
     path: &mut Vec<String>,
     settings: &Settings,
-    members: &[String],
+    members: &[(String, Option<u32>)],
 ) {
     if builder.out_of_budget() {
         builder.plain(menu, &i18n::t().menu_truncated, false);
         return;
     }
-    for member in members {
+    for (member, delay) in members {
         if builder.out_of_budget() {
             builder.plain(menu, &i18n::t().menu_truncated, false);
             break;
@@ -319,7 +383,7 @@ fn add_member_list(
                 path.pop();
                 builder.popup(
                     menu,
-                    &menu_text(member),
+                    &member_label(member, *delay),
                     submenu,
                     group.switchable,
                     member == &group.now,
@@ -328,7 +392,7 @@ fn add_member_list(
         } else {
             builder.checked(
                 menu,
-                &menu_text(member),
+                &member_label(member, *delay),
                 Action::Select {
                     group: group.name.clone(),
                     member: member.clone(),
@@ -438,6 +502,18 @@ fn group_label(group: &Group) -> String {
     }
 }
 
+/// A node as it appears in a group submenu: its name, plus the latency the kernel
+/// last measured for it. A node that was never tested keeps a bare name, and one
+/// whose test timed out says so instead of showing a plausible-looking `0ms`.
+fn member_label(member: &str, delay: Option<u32>) -> String {
+    let name = menu_text(member);
+    match delay {
+        Some(0) => i18n::t().menu_member_timeout(&name),
+        Some(ms) => i18n::t().menu_member_delay(&name, ms),
+        None => name,
+    }
+}
+
 fn menu_text(s: &str) -> String {
     // `&` is a mnemonic marker inside a menu string, and control characters (a
     // NUL in particular) would truncate the visible label while the action still
@@ -472,13 +548,30 @@ mod tests {
     };
 
     fn group(name: &str, switchable: bool, now: &str, members: &[&str]) -> Group {
+        group_with_delays(name, switchable, now, members, &[])
+    }
+
+    /// A group whose members carry the latencies `/proxies` reported for them.
+    /// `delays` is index-aligned with `members`; anything missing stays untested.
+    fn group_with_delays(
+        name: &str,
+        switchable: bool,
+        now: &str,
+        members: &[&str],
+        delays: &[Option<u32>],
+    ) -> Group {
+        let members: Vec<String> = members.iter().map(|m| m.to_string()).collect();
+        let delays = (0..members.len())
+            .map(|index| delays.get(index).copied().flatten())
+            .collect();
         Group {
             name: name.to_string(),
             kind: if switchable { "Selector" } else { "URLTest" }.to_string(),
             switchable,
             now: now.to_string(),
             fixed: String::new(),
-            members: members.iter().map(|m| m.to_string()).collect(),
+            members,
+            delays,
         }
     }
 
@@ -628,7 +721,14 @@ mod tests {
 
         let auto = find_submenu(groups, &pinned);
         assert!(!auto.is_null());
-        assert_eq!(label_at(auto, 0), i18n::t().menu_unfix.to_string());
+        // The group's own tools sit above its members: the speed test first, then
+        // the way back to automatic selection for a pinned group.
+        let entries = labels(auto);
+        assert_eq!(entries[0], i18n::t().menu_speed_test.to_string());
+        assert!(
+            entries.contains(&i18n::t().menu_unfix.to_string()),
+            "a pinned group offers unpinning: {entries:?}"
+        );
 
         for (index, action) in menu.actions.iter().enumerate() {
             let id = ID_BASE + index;
@@ -683,8 +783,12 @@ mod tests {
         let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
         assert_eq!(label_at(groups, 0), "G&&1");
         let group_menu = find_submenu(groups, "G&&1");
-        assert_eq!(label_at(group_menu, 0), "a b");
-        assert_eq!(label_at(group_menu, 1), "ok");
+        // The members keep the kernel's order, with the group's own tools above.
+        let entries = labels(group_menu);
+        assert!(
+            entries.ends_with(&["a b".to_string(), "ok".to_string()]),
+            "unexpected labels: {entries:?}"
+        );
         // The action keeps the real name even though the label is sanitised.
         assert!(menu.actions.iter().any(|action| matches!(
             action,
@@ -776,6 +880,113 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn measured_members_carry_their_latency_and_sort_fastest_first() {
+        let messages = i18n::t();
+        // Deliberately listed slowest-first, and with one node never tested and
+        // one that timed out.
+        let group = group_with_delays(
+            "Auto",
+            true,
+            "B",
+            &["Slow", "Fast", "Untested", "Dead"],
+            &[Some(400), Some(30), None, Some(0)],
+        );
+        let menu = Menu::build(&snapshot(vec![group]), &Settings::default());
+        let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
+        let auto = find_submenu(groups, "Auto");
+        let members: Vec<String> = labels(auto)
+            .into_iter()
+            .filter(|label| !label.is_empty() && label != &messages.menu_speed_test.to_string())
+            .collect();
+        assert_eq!(
+            members,
+            vec![
+                messages.menu_member_delay("Fast", 30),
+                messages.menu_member_delay("Slow", 400),
+                // Neither a timeout nor an untested node is a latency, so they
+                // share the last place and keep the order the kernel reported.
+                "Untested".to_string(),
+                messages.menu_member_timeout("Dead"),
+            ],
+            "members are ordered by measured latency, unmeasured last"
+        );
+    }
+
+    #[test]
+    fn sorting_by_delay_is_stable_and_puts_unmeasured_last() {
+        let mut entries = vec![
+            ("b".to_string(), None),
+            ("c".to_string(), Some(0)),
+            ("a".to_string(), Some(50)),
+            ("d".to_string(), Some(10)),
+            ("e".to_string(), None),
+        ];
+        sort_by_delay(&mut entries);
+        let names: Vec<&str> = entries.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["d", "a", "b", "c", "e"],
+            "fastest first; timeouts and unmeasured keep their order behind the rest"
+        );
+    }
+
+    #[test]
+    fn an_untested_group_keeps_the_order_the_kernel_reported() {
+        // mihomo's `all` array is the order the configuration asked for; without
+        // measurements there is nothing that could justify reordering it.
+        let menu = Menu::build(
+            &snapshot(vec![group("Auto", true, "c", &["c", "a", "b"])]),
+            &Settings::default(),
+        );
+        let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
+        let auto = find_submenu(groups, "Auto");
+        let members: Vec<String> = labels(auto)
+            .into_iter()
+            .filter(|label| !label.is_empty() && label != &i18n::t().menu_speed_test.to_string())
+            .collect();
+        assert_eq!(members, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn the_speed_test_entry_belongs_to_its_group_and_follows_the_controller() {
+        let menu = Menu::build(
+            &snapshot(vec![group("Auto", true, "A", &["A"])]),
+            &Settings::default(),
+        );
+        let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
+        let auto = find_submenu(groups, "Auto");
+        let index = menu
+            .actions
+            .iter()
+            .position(|action| matches!(action, Action::SpeedTest(group) if group == "Auto"))
+            .expect("the speed-test entry exists");
+        let id = (ID_BASE + index) as u32;
+        assert_eq!(
+            label(auto, ID_BASE + index),
+            i18n::t().menu_speed_test.to_string()
+        );
+        assert_eq!(
+            unsafe { GetMenuState(auto, id, MF_BYCOMMAND) } & MF_GRAYED,
+            0,
+            "a reachable controller leaves the entry clickable"
+        );
+
+        // Testing a group is a controller call, so without one there is nothing
+        // to ask.
+        let mut offline = snapshot(vec![group("Auto", true, "A", &["A"])]);
+        offline.controller_ok = false;
+        let offline = Menu::build(&offline, &Settings::default());
+        let index = offline
+            .actions
+            .iter()
+            .position(|action| matches!(action, Action::SpeedTest(_)));
+        assert!(
+            index.is_none(),
+            "an unreachable controller offers no speed test"
+        );
     }
 
     #[test]

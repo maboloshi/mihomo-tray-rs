@@ -38,6 +38,9 @@ menu:
   restart_kernel: Restart kernel
   force_restart_kernel: Force restart kernel
   web_ui: Open web dashboard
+  speed_test: Speed-test this group
+  member_delay: {name} ({ms}ms)
+  member_timeout: {name} (timeout)
   more: More
   exit: Exit
   exit_stop_kernel: Exit and stop Mihomo
@@ -55,6 +58,7 @@ status:
   force_restarting: Stopping the kernel and starting it from tray.yml…
   elevating_kernel: Restarting the kernel as administrator…
   elevating_stop: Stopping the kernel as administrator…
+  speed_testing: Speed-testing {group}…
 
 state:
   on: on

@@ -18,6 +18,16 @@ pub struct Group {
     /// never report it.
     pub fixed: String,
     pub members: Vec<String>,
+    /// The latest latency `/proxies` reports for each member, index-aligned with
+    /// [`Group::members`]. `None` means the kernel has recorded no `history` for
+    /// that member (it was never tested); `Some(0)` is mihomo's "the test timed
+    /// out". Both are kept apart from a real measurement on purpose: the menu
+    /// shows a number only where there is one.
+    ///
+    /// A `Vec` rather than a map: this program measures its binary in kilobytes
+    /// and a `HashMap` would link the hashing machinery back in (`docs/DESIGN.md`
+    /// §11), while a group has a handful of members.
+    pub delays: Vec<Option<u32>>,
 }
 
 #[derive(Debug, Clone, Default)]

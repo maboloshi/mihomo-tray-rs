@@ -17,6 +17,11 @@ use crate::state::Group;
 /// takes seconds to come back must not turn every candidate into a stall.
 const PROBE_TIMEOUT_MS: u32 = 800;
 
+/// The per-node budget a group test is asked for (`timeout` query parameter).
+/// mihomo applies it to each member in turn, so the *request* has to be allowed
+/// to last the sum of it; see `DELAY_TEST_TIMEOUT_MS` in `src/app.rs`.
+const DELAY_QUERY_TIMEOUT_MS: u32 = 3000;
+
 /// The dashboard used when `tray.yml` configures none: the kernel's own
 /// `external-ui`, which mihomo serves under this path of the controller.
 const DEFAULT_WEB_UI: &str = "http://{host}:{port}/ui/";
@@ -273,16 +278,25 @@ impl Client {
                 continue; // a plain node, not a group
             };
             let kind = entry["type"].as_str().unwrap_or_default().to_string();
+            let members: Vec<String> = members
+                .iter()
+                .filter_map(|m| m.as_str().map(str::to_string))
+                .collect();
+            // `history` lives on the node, not on the group, and it only exists
+            // after that node was tested at least once (`docs/DESIGN.md` §5), so a
+            // member without one stays `None` instead of looking like 0 ms.
+            let delays = members
+                .iter()
+                .map(|member| node_delay(map, member))
+                .collect();
             groups.push(Group {
                 name: name.clone(),
                 switchable: is_switchable(&kind),
                 kind,
                 now: entry["now"].as_str().unwrap_or_default().to_string(),
                 fixed: entry["fixed"].as_str().unwrap_or_default().to_string(),
-                members: members
-                    .iter()
-                    .filter_map(|m| m.as_str().map(str::to_string))
-                    .collect(),
+                members,
+                delays,
             });
         }
         Ok(groups)
@@ -333,6 +347,31 @@ impl Client {
         self.body_of("POST", "/restart", None).map(|_| ())
     }
 
+    /// Ask the kernel to test every node of a group (`GET /group/{name}/delay`).
+    ///
+    /// The route is synchronous and walks the group's members one at a time with
+    /// `timeout` milliseconds each, so a large group can take many seconds — far
+    /// longer than an ordinary request gets. The caller decides how long to wait
+    /// (see `DELAY_TEST_TIMEOUT_MS` in `src/app.rs`); what this method does not do
+    /// is pretend the answer is the result: mihomo writes each measurement into
+    /// the node's `history`, and the very next `GET /proxies` is where the
+    /// numbers come from, so there is nothing here to hand to the UI.
+    ///
+    /// `url` is the probe target (`generate_204`-style endpoints answer with an
+    /// empty body and no TLS interception).
+    pub fn delay(&self, group: &str, url: &str) -> Result<(), String> {
+        let path = format!(
+            "/group/{}/delay?timeout={}&url={}",
+            percent_encode(group),
+            DELAY_QUERY_TIMEOUT_MS,
+            percent_encode(url)
+        );
+        // Parsed rather than discarded: a controller that answers 200 with
+        // something that is not JSON is worth reporting instead of being read as
+        // "the group was tested".
+        self.json(&path).map(|_| ())
+    }
+
     /// Close every connection the kernel is proxying (`DELETE /connections`).
     ///
     /// mihomo walks its own connection table, closes each entry and answers `204`
@@ -351,6 +390,18 @@ impl Client {
 /// and the plain node types answer `400 Must be a Selector`.
 fn is_switchable(kind: &str) -> bool {
     matches!(kind, "Selector" | "URLTest" | "Fallback")
+}
+
+/// The latency mihomo last measured for a node, out of the whole `/proxies` map.
+///
+/// `history` is a list of samples and only the last one describes the node as it
+/// is now; a member that was never tested has no list at all. mihomo records `0`
+/// when the test timed out or was refused, which reaches the menu as "timeout"
+/// rather than as a suspicious 0 ms.
+fn node_delay(map: &serde_json::Map<String, Value>, member: &str) -> Option<u32> {
+    let history = map.get(member)?["history"].as_array()?;
+    let delay = history.last()?["delay"].as_u64()?;
+    Some(delay.min(u32::MAX as u64) as u32)
 }
 
 /// Percent-encode everything outside the RFC 3986 unreserved set (group names
@@ -589,6 +640,64 @@ mod tests {
         for kind in ["LoadBalance", "Relay", "Direct", "Reject", ""] {
             assert!(!is_switchable(kind), "{kind} must stay read-only");
         }
+    }
+
+    #[test]
+    fn latency_comes_from_the_last_history_sample_of_each_member() {
+        let server = spawn_server(
+            200,
+            "OK",
+            r#"{"proxies":{
+                "A":{"type":"Shadowsocks","history":[{"time":"t1","delay":90},{"time":"t2","delay":42}]},
+                "B":{"type":"Shadowsocks","history":[{"time":"t1","delay":0}]},
+                "C":{"type":"Shadowsocks"},
+                "Group":{"type":"Selector","all":["A","B","C","Missing"],"now":"A"}
+            }}"#,
+        );
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        let groups = client.proxies().unwrap();
+        let group = groups.iter().find(|g| g.name == "Group").expect("Group");
+
+        assert_eq!(
+            group.delays,
+            vec![Some(42), Some(0), None, None],
+            "the newest sample wins, 0 is a timeout, and a node with no history is not 0ms"
+        );
+        assert_eq!(
+            group.delays.len(),
+            group.members.len(),
+            "delays stay index-aligned with members"
+        );
+    }
+
+    #[test]
+    fn delay_asks_the_controller_to_test_the_group() {
+        // mihomo answers with a per-member delay map; the tray only needs to know
+        // the request was accepted, and reads the numbers back from `/proxies`.
+        let server = spawn_server(200, "OK", r#"{"A":42,"B":0}"#);
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        client
+            .delay("自动选择", "http://www.gstatic.com/generate_204")
+            .unwrap();
+
+        let sent = server.request();
+        assert_eq!(sent.method, "GET");
+        assert_eq!(
+            sent.path,
+            format!(
+                "/group/%E8%87%AA%E5%8A%A8%E9%80%89%E6%8B%A9/delay?timeout={DELAY_QUERY_TIMEOUT_MS}\
+                 &url=http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
+            )
+        );
+    }
+
+    #[test]
+    fn a_group_test_that_does_not_answer_is_reported() {
+        // The point of the test: a 200 whose body is not the expected object must
+        // not be read as "the group was measured".
+        let server = spawn_server(200, "OK", "not json");
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        assert!(client.delay("Auto", "http://example.invalid/").is_err());
     }
 
     #[test]
