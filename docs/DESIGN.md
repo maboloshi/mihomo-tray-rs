@@ -28,7 +28,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 
 ### 1.2 明确不做
 
-设置窗口、自绘弹窗、owner-draw 视觉、节点延迟色点、流量/内存曲线、订阅 provider 刷新、脚本执行、CFW 式的 HTML 界面。图形化设置不由本程序提供：交给内核自己的面板（`打开 Web 面板`），本程序只负责把地址交给默认浏览器。
+设置窗口、自绘弹窗、owner-draw 视觉、节点延迟色点、流量/内存曲线、订阅 provider 刷新、脚本执行、CFW 式的 HTML 界面。延迟本身以**原生菜单项的文本**呈现（§3.2），不为此引入 owner-draw。图形化设置不由本程序提供：交给内核自己的面板（`打开 Web 面板`），本程序只负责把地址交给默认浏览器。
 
 ---
 
@@ -72,6 +72,9 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
 ─────────────────────────────
 代理分组 ▶
    GLOBAL ▶
+      ─────────────
+      测速本组节点                 ← 调 GET /group/GLOBAL/delay
+      ─────────────
       ● DIRECT
         REJECT
         PROXY ▶            ← 成员本身是组时递归（深度上限 4，带防环集合）
@@ -134,6 +137,15 @@ SetMenuInfo(hmenu, &mi);
 - 若仍不好用，可设 `groups.page_size`（默认 `0` = 关闭）：成员数超过该值的分组自动拆成翻页子菜单（`1–50 ▶` / `51–100 ▶`），不依赖任何滚动行为，确定可达；
 - 滚轮滚动：**未实现**（见上表）。
 
+### 3.2 节点延迟（文本，不做 owner-draw）
+
+色点要 `WM_MEASUREITEM`/`WM_DRAWITEM` 全套（`MF_OWNERDRAW` 之后每一项的高度、绘制、深色主题、DPI 都得自己算），并会失去原生菜单免费的定位/圆角/主题，实测同类 Win32 代码链入约 15–35 KiB。这里改用**原生菜单项的文本**，观感是 `名称 (123ms)` / `名称 (超时)`，代价实测 **+4.5 KiB**：
+
+- **触发**：每个组的子菜单顶部一项「测速本组节点」（`ready` 且组非空时可用，只加在顶层组子菜单，嵌套层级不重复，免得吃满 `MAX_ITEMS`）。点击 → `GET /group/{name}/delay?timeout=3000&url=…`。该路由是**整组串行**测，所以这一次请求单独放宽到 30 s，不受 `controller.timeout_ms`（默认 2 s）约束，否则内核还在测、WinHTTP 先超时。
+- **数据来源**：`/proxies` 里每个节点自己的 `history` 最后一项 `delay`。测速不改状态，只是让内核写 `history`；下一次轮询（默认 3 s 内）就把数字带进菜单，因此**不需要在快照里存第二份结果**，也不会过期。`0` 是内核的「超时」，与「没测过」分开：前者显示 `(超时)`，后者不显示后缀。
+- **排序**：只在**有测量值**时按延迟升序（无测量值的排最后、保持内核给的顺序）；没有 `history` 时保持 mihomo `all` 数组的原序——那是配置里的顺序，不该因为没测速就被改掉。排序用自己写的插入排序：标准库的稳定排序是「每个元素类型实例化一次」的大函数，`ordered_groups` 已经付过一次，再来一次实测约 4 KiB，而一个组只有几十个节点。
+- **不引入 `HashMap`**：延迟与成员**下标对齐**地放在 `Group::delays`（`Vec<Option<u32>>`）。`HashMap` 会把哈希表代码重新链进来，§11 记录过这是主动砍掉的 4.5 KiB。
+
 ---
 
 ## 4. 内核、配置与控制器来自哪里
@@ -173,7 +185,7 @@ SetMenuInfo(hmenu, &mi);
 | 分组与节点 | `GET /proxies` | 顺序=字典序；`all` 非空的即分组；`history` 可能不存在（未测速） |
 | 切换节点 | `PUT /proxies/{urlencode(group)}` `{"name":"member"}` | 组名/成员名必须 percent-encode（中文必需）；仅 `Selector`/`URLTest`/`Fallback` 可写，其余返回 400 |
 | 取消固定 | `DELETE /proxies/{urlencode(group)}` | 只对非 `Selector` 的可写组有效（内核 `ForceSet("")`） |
-| （Phase 2）测速 | `GET /group/{name}/delay?timeout=3000&url=…` | 实测返回 `{"成员":延迟}`，并让 `/proxies` 出现 `history` |
+| 测速 | `GET /group/{name}/delay?timeout=3000&url=…` | 整组**串行**测（组越大越久），响应是 `{"成员":延迟}`；真正的数据落在各节点的 `history` 里，由下一次 `GET /proxies` 读回（§3.2）。请求侧单独放宽到 30 s，不能用 `controller.timeout_ms` |
 | 关闭所有连接 | `DELETE /connections` | 内核遍历连接表逐个关闭后回 `204`（`hub/route/connections.go` 的 `closeAllConnections`）；连接不是设置，下一个请求会重建，所以是"立刻丢弃已开的连接"而非一个保持关闭的开关，也无需二次确认 |
 
 ### 5.1 Windows 侧的坑（本轮全部实测过）
@@ -299,8 +311,9 @@ ui:
 |---|---|---|
 | Phase 0 | 技术验证：raw 托盘 + WinHTTP 调控制器 + 原生菜单 + 清单/深色；已产出体积/内存数据与菜单截图 | **已完成** |
 | Phase 1 | MVP：§1.1 全部菜单项 + `tray.yml` + 三条发现链 + 单实例 + TaskbarCreated；真机复测体积/内存并截图；人工验证清单 #1–#12、#16 通过（#13–#15 待验证，见 [ROADMAP.md](ROADMAP.md)） | **已完成** |
-| Phase 2（可选） | 只读组 `now` 展示增强、`/group/{name}/delay` 测速项、退出时禁用系统代理、schtasks 免 UAC 自启 | 视需要 |
+| Phase 2（可选） | 只读组 `now` 展示增强、退出时禁用系统代理、schtasks 免 UAC 自启 | 视需要 |
 | Phase 2 已做 | 「更多」子菜单 + `重启内核`（`POST /restart`）+ `强制重启内核`（按 `tray.yml` 归一别人的内核，含提权副本 `--kernel-replace-elevated`）+ `关闭所有连接`（`DELETE /connections`） | **已完成**，重启内核见 [RESTART_KERNEL.md](RESTART_KERNEL.md) |
+| Phase 2 已做 | 组内「测速本组节点」（`GET /group/{name}/delay`）+ 成员延迟文本 `(123ms)`/`(超时)` 与按延迟排序（§3.2；不做 owner-draw 色点） | **已完成**（2026-10） |
 
 ---
 
@@ -315,6 +328,14 @@ ui:
 7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（62 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
    **模板由构建脚本生成**：`lang/en-US.yml` 的标记行以下部分是 `build.rs` 从 `src/i18n.rs` 重写出来的——键取自 `messages!` 列表（只有那里拼键名），值取自内置 `EN_US` 表，生成文本的 FNV-1a 指纹经 `cargo:rustc-env` 交给单测，手改生成段或改文案没重建都会让单测失败。标记行以上是手写说明，构建脚本原样保留。于是「新增或修改文案」只剩改 `src/i18n.rs` 一处，不再需要手工同步语言文件。
    **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB，当时的数字），远高于动工前估的 3–4 KB——语言表本体、62 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（62 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
+
+### 节点延迟（文本呈现，2026-10）
+
+原「Phase 2 候选」里这条的估价是**成本大**，因为健康色点必须 owner-draw。最终采用不引入任何新 Win32 机制的文本方案（§3.2），实测体积从 **343,040 B → 347,648 B（+4,608 B）**，单测 89 → 96。
+
+- 期间试过、并**被实测否掉**的两条路：把延迟放进 `Snapshot` 的 `std::collections::HashMap`（把 SipHash/hashbrown 重新链进来，与 §11.7 的做法相反），以及用 `serde_json::Value::to_string()` 把 `/group/{name}/delay` 的响应直接显示出来（首次触发 `serde_json` 的**序列化器**，此前全仓库只用 `from_str`）。两者合计让二进制到 363,008 B（+19.5 KiB）。改为「下标对齐的 `Vec<Option<u32>>` + 只读 `history` 的数字」后回到 +4.5 KiB。
+- 排序是第二块成本：`slice::sort_by_key`/`sort_by_cached_key` 会为 `(String, Option<u32>)` 再实例化一次标准库稳定排序，实测 **+4.1–4.6 KiB**；改写为十几行的稳定插入排序后该成本归零（组内节点数由 `MAX_ITEMS` 兜底）。
+- 由此固定的两条实现边界：**快照里不存测速结果**（数据源就是内核的 `history`，下一次 `/proxies` 自然带回来），以及**没有测量值时不重排**（mihomo 的 `all` 顺序就是配置顺序）。
 
 ### 二进制体积复查（2026-09）
 

@@ -8,8 +8,8 @@ Phase 1（MVP）已实现并真机验证：
 
 - 9 项菜单功能（状态行 / 系统代理 / 代理模式 / TUN / 代理分组 / 开机自启动 / 重载配置 / 打开 Web 面板 / 退出两项）全部可用
 - 内核自发现（同目录/`bin`/`core` → `PATH`，只搜 `mihomo.exe` 这个名字，命中 Scoop shim 时按 `mihomo.shim` 的 `path` 换成真内核；`mihomo.path` 填了就只认它，改名内核也支持），配置/控制器按 mihomo 自己的规则解析（`mihomo.home`/`config` 或内核带来的那份 + 运行内核的 argv → 环境变量 → 配置文件 → `controller.*` 兜底），没有端口探测；「配置文件里没有 `external-controller`、地址由命令行或环境变量注入」的机器同样能定位
-- `cargo fmt --check`、`cargo clippy --release --all-targets`、`cargo test --release` 全绿（89 个单测）
-- 实测（0.2.1，rustc 1.98.0）：exe 343,040 B（≈335 KiB）；空闲私有内存 2.2 MB（私有工作集）、工作集 ~15 MB（冷启动 20 s 的读数，见 [README.md](../README.md)）
+- `cargo fmt --check`、`cargo clippy --release --all-targets`（0 warning）、`cargo test --release` 全绿（96 个单测）
+- 实测（0.2.1，rustc 1.98.0）：exe 347,648 B（≈339.5 KiB，含 2026-10 的节点延迟文本显示；该功能前为 343,040 B）；空闲私有内存 2.2 MB（私有工作集）、工作集 ~15 MB（冷启动 20 s 的读数，见 [README.md](../README.md)）
 - 验证方式：真机运行截图 [`app-menu-light.png`](assets/app-menu-light.png) / [`app-menu-dark.png`](assets/app-menu-dark.png) + 分组数据逐项比对 live API + 长列表滚动箭头（[`native-menu-scroll-arrows.png`](assets/native-menu-scroll-arrows.png)）
 - 人工验证（2026-09）：清单 **#1–#12、#16 通过**，**#13–#15 待验证**；唯一与预期不符的是 #2 的长列表滚动方式（只有「点击/按住箭头 + 方向键」能用，见下节）
 
@@ -78,7 +78,7 @@ Phase 1（MVP）已实现并真机验证：
 
 | 功能 | 价值 | 成本 | 备注 |
 |---|---|---|---|
-| 一键测速（`GET /group/{name}/delay`） | 中 | 小 | 测速后 `/proxies` 才出现 `history`，可顺带把延迟写进菜单文本 |
+| ~~一键测速（`GET /group/{name}/delay`）~~ | — | — | **已实现**（2026-10）：组子菜单顶部「测速本组节点」；测速后 `/proxies` 的 `history` 被读进成员标签（`(123ms)`/`(超时)`）并按延迟排序 |
 | 退出时禁用系统代理（`proxy.system_proxy_on_exit`） | 中 | 小 | 配置项已预留语义 |
 | ~~关闭所有连接（`DELETE /connections`）~~ | — | — | **已实现**（2026-09）：「更多 ▶ 关闭所有连接」，内核回 `204` 后连接由下个请求重建；需控制器，无则灰显 |
 | ~~重启内核（`POST /restart`）~~ | — | — | **已实现**（2026-09，`feat/restart-kernel`）：「更多 ▶ 重启内核」。提权与环境原样保持，客户端改 owned `Option<Client>` 即可热替换——原估的"中等成本"其实是十处签名 |
@@ -86,7 +86,7 @@ Phase 1（MVP）已实现并真机验证：
 | 订阅 provider 刷新（`PUT /providers/proxies/{name}`） | 中 | 小 | 需先读 `/providers/proxies` 展示 `updatedAt` |
 | 长列表滚轮滚动 | 中 | 大 | 清单 #2 的未实现项：原生菜单 + 当前实现下滚轮与悬停箭头都不滚。要支持得换掉原生菜单（自绘弹窗）或额外接管消息循环（可行性本轮未验证），丢掉系统免费提供的定位/子菜单/键盘导航/点外部关闭；现状已由「点击/按住箭头 + 方向键 + `groups.page_size` 翻页」兜住 |
 | ~~schtasks 免 UAC 自启（含 TUN 开机即用）~~ | — | — | 已否决：计划任务服务可能被禁用。改为点 TUN 时按需提权（一次性辅助进程重启内核） |
-| 节点延迟/健康色点（owner-draw 菜单项） | 中 | 大 | 观感提升明显，但要 `WM_MEASUREITEM`/`WM_DRAWITEM` 全套 |
+| ~~节点延迟/健康色点（owner-draw 菜单项）~~ | — | — | **已用低代价方式落地**（2026-10）：不做 `WM_MEASUREITEM`/`WM_DRAWITEM`，延迟以文本 `(123ms)` 追加在成员名后，实测体积代价 +4.5 KiB（`HashMap` 与 `serde_json` 序列化器都不引入，排序自己写以避免第二次泛型排序实例化）；色点本身仍不做 |
 | 设置界面 | 高 | 大 | 用 Tauri 会毁掉体积/内存优势；建议原生对话框或继续编辑 `tray.yml`。**内核侧的图形化设置已由「打开 Web 面板」覆盖**，这里说的只剩本程序自己的 `tray.yml` |
 | 手写 JSON 取值替代 `serde_json` | 低 | 中 | 实测只能省 ~33 KB，不推荐 |
 
