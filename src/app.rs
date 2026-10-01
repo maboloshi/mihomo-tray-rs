@@ -285,18 +285,20 @@ const KERNEL_STARTUP_BUDGET: Duration = Duration::from_secs(5);
 
 /// How long a group test may take from this side.
 ///
-/// `GET /group/{name}/delay` is synchronous and walks the group's members one at
-/// a time, each with the per-node timeout the request asks for (3 s, see
-/// `api::DELAY_QUERY_TIMEOUT_MS`), so the sum is what has to fit — not the
-/// controller's ordinary request timeout, which is an order of magnitude
-/// smaller and would report a failed request for a test that is still running.
-const DELAY_TEST_TIMEOUT_MS: u32 = 30_000;
+/// The kernel answers `GET /group/{name}/delay` within the `timeout` it was asked
+/// for (`api::DELAY_QUERY_TIMEOUT_MS`, 3 s) plus a little for the round trip, so
+/// this only has to be comfortably larger than that. It exists because the
+/// controller's ordinary request timeout (2 s by default) is *smaller* than the
+/// kernel's own deadline: without it, WinHTTP would give up while the kernel was
+/// still testing and report a failure for a test that was about to succeed.
+const DELAY_TEST_TIMEOUT_MS: u32 = 10_000;
 
-/// What a group test probes. mihomo's own default and the URL its panels use:
-/// an endpoint that answers `204` with no body, so the measurement is the
-/// connection, not a page transfer. Not configurable yet; if it ever needs to
-/// be, it belongs next to `ui.web_url` in `tray.yml`.
-const DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
+/// What a group test probes. mihomo's own default (`constant.DefaultTestURL`) and
+/// the URL its panels use: `https`, because its source warns that a plain-http
+/// test address may be hijacked by a provider and then fails for reasons that
+/// have nothing to do with latency. Not configurable yet; if it ever needs to be,
+/// it belongs next to `ui.web_url` in `tray.yml`.
+const DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 
 /// Everything an action needs besides the command itself.
 struct Worker<'a> {
@@ -543,9 +545,9 @@ fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
         Command::CloseConnections => client.close_connections(),
         Command::StopKernelElevated => return stop_kernel_elevated(worker),
         Command::Refresh => Ok(()),
-        // A group test walks every member at its own timeout, so it needs a
+        // A group test has the kernel's own deadline inside it, so it gets a
         // request budget of its own: the configured one is sized for single
-        // requests and would cut the answer off in the middle of the test.
+        // requests and would cut the answer off before the kernel had finished.
         //
         // Nothing about the result is published here. The measurements land in
         // each node's `history` inside the kernel, and the refresh that follows

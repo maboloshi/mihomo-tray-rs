@@ -17,9 +17,10 @@ use crate::state::Group;
 /// takes seconds to come back must not turn every candidate into a stall.
 const PROBE_TIMEOUT_MS: u32 = 800;
 
-/// The per-node budget a group test is asked for (`timeout` query parameter).
-/// mihomo applies it to each member in turn, so the *request* has to be allowed
-/// to last the sum of it; see `DELAY_TEST_TIMEOUT_MS` in `src/app.rs`.
+/// The budget a group test is asked for (`timeout` query parameter). mihomo
+/// applies it as one deadline to the whole group, which it tests concurrently,
+/// so this is the total the request needs — see `DELAY_TEST_TIMEOUT_MS` in
+/// `src/app.rs`, which is the larger one the HTTP side waits with.
 const DELAY_QUERY_TIMEOUT_MS: u32 = 3000;
 
 /// The dashboard used when `tray.yml` configures none: the kernel's own
@@ -349,16 +350,21 @@ impl Client {
 
     /// Ask the kernel to test every node of a group (`GET /group/{name}/delay`).
     ///
-    /// The route is synchronous and walks the group's members one at a time with
-    /// `timeout` milliseconds each, so a large group can take many seconds — far
-    /// longer than an ordinary request gets. The caller decides how long to wait
-    /// (see `DELAY_TEST_TIMEOUT_MS` in `src/app.rs`); what this method does not do
-    /// is pretend the answer is the result: mihomo writes each measurement into
-    /// the node's `history`, and the very next `GET /proxies` is where the
-    /// numbers come from, so there is nothing here to hand to the UI.
+    /// mihomo runs the members **concurrently** under a single deadline of
+    /// `timeout` milliseconds (`adapter/outboundgroup/groupbase.go`), so the call
+    /// takes about that long however large the group is — and an ordinary request
+    /// timeout, which is shorter, would cut it off. It answers `504` when no
+    /// member came back at all.
     ///
-    /// `url` is the probe target (`generate_204`-style endpoints answer with an
-    /// empty body and no TLS interception).
+    /// What this method does not do is pretend the answer is the result: mihomo
+    /// writes every measurement into the node's own `history` (delay `0` for a
+    /// test that failed), and the next `GET /proxies` is where the numbers come
+    /// from, so there is nothing here to hand to the UI.
+    ///
+    /// `url` is the probe target. A `generate_204`-style endpoint answers with an
+    /// empty body; `https` is what mihomo itself defaults to and what its own
+    /// source recommends, because a plain-http test address can be hijacked by a
+    /// provider and then fails for reasons that have nothing to do with latency.
     pub fn delay(&self, group: &str, url: &str) -> Result<(), String> {
         let path = format!(
             "/group/{}/delay?timeout={}&url={}",
@@ -677,7 +683,7 @@ mod tests {
         let server = spawn_server(200, "OK", r#"{"A":42,"B":0}"#);
         let client = Client::new(&server.address(), "", 2000).unwrap();
         client
-            .delay("自动选择", "http://www.gstatic.com/generate_204")
+            .delay("自动选择", "https://www.gstatic.com/generate_204")
             .unwrap();
 
         let sent = server.request();
@@ -686,7 +692,7 @@ mod tests {
             sent.path,
             format!(
                 "/group/%E8%87%AA%E5%8A%A8%E9%80%89%E6%8B%A9/delay?timeout={DELAY_QUERY_TIMEOUT_MS}\
-                 &url=http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
+                 &url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
             )
         );
     }
