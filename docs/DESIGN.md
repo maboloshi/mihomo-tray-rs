@@ -139,13 +139,17 @@ SetMenuInfo(hmenu, &mi);
 
 ### 3.2 节点延迟（文本，不做 owner-draw）
 
-色点要 `WM_MEASUREITEM`/`WM_DRAWITEM` 全套（`MF_OWNERDRAW` 之后每一项的高度、绘制、深色主题、DPI 都得自己算），并会失去原生菜单免费的定位/圆角/主题，实测同类 Win32 代码链入约 15–35 KiB。这里改用**原生菜单项的文本**，观感是 `名称 (123ms)` / `名称 (超时)`，代价实测 **+4.5 KiB**：
+色点要 `WM_MEASUREITEM`/`WM_DRAWITEM` 全套（`MF_OWNERDRAW` 之后每一项的高度、绘制、深色主题、DPI 都得自己算），并会失去原生菜单免费的定位/圆角/主题，实测同类 Win32 代码链入约 15–35 KiB。这里改用**原生菜单项的文本**，观感是 `名称 (123ms)` / `名称 (超时)`，代价实测 **+6.0 KiB**：
 
 - **触发**：每个组的子菜单顶部一项「测速本组节点」（控制器可达且组非空时可用，只加在顶层组子菜单，嵌套层级不重复，免得吃满 `MAX_ITEMS`）。点击 → `GET /group/{name}/delay?timeout=3000&url=…`。内核把这 3 s 当作**整个组的截止时间**、成员**并发**测（`adapter/outboundgroup/groupbase.go` 的 `GroupBase.URLTest`），所以无论组多大都在 3 s 量级返回；全部成员都没回来时该路由回 `504`。请求侧仍要单独放宽（本程序用 10 s），因为 `controller.timeout_ms` 默认只有 2 s —— 比内核自己的截止时间还短，不放宽就会"内核还在测、WinHTTP 先超时"。
 - **副作用（内核行为，不是本程序加的）**：`hub/route/groups.go` 的 `getGroupDelay` 对 `URLTest`/`Fallback` 组会先 `ForceSet("")`，也就是**测速会把已固定的组解固定**。菜单里那项因此不适合当作"只看一眼延迟"的无副作用操作；`Selector` 组不受影响。
-- **数据来源**：`/proxies` 里每个节点自己的 `history` 最后一项 `delay`（`{"time":…,"delay":N}`，内核固定保留 10 条，`history` 始终存在、未测速时是空数组）。测速只是让内核写 `history`；下一次轮询（默认 3 s 内）就把数字带进菜单，因此**不需要在快照里存第二份结果**，也不会过期。测失败的记录 `delay` 为 `0`，与「没测过」（空数组）分开：前者显示 `(超时)`，后者不显示后缀。
+- **数据来源（两处，缺一不可）**：每个节点自己的 `history` 最后一项 `delay`（`{"time":…,"delay":N}`，内核固定保留 10 条，未测速时是空数组）。
+  - `GET /proxies` 给的是内置适配器（`DIRECT`/`REJECT`/…）与**分组**；
+  - **订阅节点不在 `/proxies` 里**——实测本机 v1.19.31 的 `/proxies` 只有 9 个键（6 个内置 + 3 个分组），31 个订阅节点只出现在 `GET /providers/proxies` 的 `providers.<名>.proxies[]`。第一版只读 `/proxies`，于是「节点」那一半永远查不到，菜单里一个数字都不显示（这正是用户反馈的现象）。
+  - 两份都是内核自己的测量值（它自己每几分钟健康检查一次），所以**不需要在快照里存第二份结果**，也不会过期；「测速本组节点」只是让内核立刻重测一遍。测失败的记录 `delay` 为 `0`，与「没测过」（空数组）分开：前者显示 `(超时)`，后者不显示后缀。
+  - `/providers/proxies` 比 `/proxies` 大得多而且随订阅规模增长（本机 31 节点 ≈ 47 KB，`/proxies` ≈ 4 KB），所以它按**自己的较慢节奏**读（`PROVIDER_LATENCY_REFRESH = 30 s`，在 `src/app.rs`），中间复用上次结果；点一次测速会把这个期限清零，让刚测出来的数字在下一次刷新就到。
 - **排序**：只在**有测量值**时按延迟升序（无测量值的排最后、保持内核给的顺序）；没有 `history` 时保持 mihomo `all` 数组的原序——那是配置里的顺序，不该因为没测速就被改掉。排序用自己写的插入排序：标准库的稳定排序是「每个元素类型实例化一次」的大函数，`ordered_groups` 已经付过一次，再来一次实测约 4 KiB，而一个组只有几十个节点。
-- **不引入 `HashMap`**：延迟与成员**下标对齐**地放在 `Group::delays`（`Vec<Option<u32>>`）。`HashMap` 会把哈希表代码重新链进来，§11 记录过这是主动砍掉的 4.5 KiB。
+- **不引入 `HashMap`**：延迟是快照里的 `Vec<(节点名, Option<u32>)>`（§11 记录过 `HashMap` 会把哈希表代码重新链进来，是主动砍掉的 4.5 KiB），菜单按名字线性查找——一个子菜单只查自己的成员一次。
 
 ---
 
@@ -183,10 +187,11 @@ SetMenuInfo(hmenu, &mi);
 | 开关 TUN | `PATCH /configs` `{"tun":{"enable":true}}` | TUN 建立失败只写日志并把 enable 置 false，**HTTP 仍返回 204** → 必须回读确认；回读仍为 false 说明内核没提权：用 `--kernel-start-elevated <pid>` 提权副本重启内核后重试（建 Wintun 需要管理员） |
 | 重载配置 | `PUT /configs?force=true`，body `{"path":""}` | **空 body 会 400**；不带 `force` 不重建 inbound；`path` 为空时 mihomo 回落到自己启动时的配置文件 |
 | 重启内核 | `POST /restart` | 先回 `200 {"status":"ok"}` 再关进程，所以"响应成功"**不等于**内核已经起来，必须再探活；Windows 上内核用 `exec.Command`+`os.Exit` 以**自己的 argv 与环境**重建进程，因此提权保持、地址不变，但也意味着"别人的内核"重启后仍然是别人的（设置仍不可知） |
-| 分组与节点 | `GET /proxies` | 顺序=字典序；`all` 非空的即分组；`history` 可能不存在（未测速） |
+| 分组与节点 | `GET /proxies` | 顺序=字典序；`all` 非空的即分组；**只有内置适配器与分组，订阅节点不在这里**（见下一行）；`history` 未测速时是空数组 |
+| 订阅节点 | `GET /providers/proxies` | `providers.<名>.proxies[]` 才列出订阅的节点及其 `history`；响应比 `/proxies` 大得多且随订阅规模增长，按较慢节奏读（§3.2） |
 | 切换节点 | `PUT /proxies/{urlencode(group)}` `{"name":"member"}` | 组名/成员名必须 percent-encode（中文必需）；仅 `Selector`/`URLTest`/`Fallback` 可写，其余返回 400 |
 | 取消固定 | `DELETE /proxies/{urlencode(group)}` | 只对非 `Selector` 的可写组有效（内核 `ForceSet("")`） |
-| 测速 | `GET /group/{name}/delay?timeout=3000&url=…` | 成员**并发**测、3 s 是**整个组**的截止（不是每个节点）；全失败回 `504`。响应 `{"成员":延迟}` 只说明谁回来了，真正的数据落在各节点的 `history`，由下一次 `GET /proxies` 读回（§3.2）。请求侧单独放宽（本程序 10 s），不能用 `controller.timeout_ms`。**对 `URLTest`/`Fallback` 组会先解固定**。探测 URL 用 mihomo 自己的默认值（`https://www.gstatic.com/generate_204`）：内核源码里明确警告 http 测试地址可能被机场劫持而测失败 |
+| 测速 | `GET /group/{name}/delay?timeout=3000&url=…` | 成员**并发**测、3 s 是**整个组**的截止（不是每个节点）；全失败回 `504`。响应 `{"成员":延迟}` 只说明谁回来了，真正的数据落在各节点的 `history`，由 `GET /proxies` + `GET /providers/proxies` 读回（§3.2）。请求侧单独放宽（本程序 10 s），不能用 `controller.timeout_ms`。**对 `URLTest`/`Fallback` 组会先解固定**。探测 URL 用 mihomo 自己的默认值（`https://www.gstatic.com/generate_204`）：内核源码里明确警告 http 测试地址可能被机场劫持而测失败 |
 | 关闭所有连接 | `DELETE /connections` | 内核遍历连接表逐个关闭后回 `204`（`hub/route/connections.go` 的 `closeAllConnections`）；连接不是设置，下一个请求会重建，所以是"立刻丢弃已开的连接"而非一个保持关闭的开关，也无需二次确认 |
 
 ### 5.1 Windows 侧的坑（本轮全部实测过）
@@ -332,12 +337,13 @@ ui:
 
 ### 节点延迟（文本呈现，2026-10）
 
-原「Phase 2 候选」里这条的估价是**成本大**，因为健康色点必须 owner-draw。最终采用不引入任何新 Win32 机制的文本方案（§3.2），实测体积从 **343,040 B → 347,648 B（+4,608 B）**，单测 89 → 96。
+原「Phase 2 候选」里这条的估价是**成本大**，因为健康色点必须 owner-draw。最终采用不引入任何新 Win32 机制的文本方案（§3.2），实测体积从 **343,040 B → 349,184 B（+6,144 B）**，单测 89 → 97。
 
-- 期间试过、并**被实测否掉**的两条路：把延迟放进 `Snapshot` 的 `std::collections::HashMap`（把 SipHash/hashbrown 重新链进来，与 §11.7 的做法相反），以及用 `serde_json::Value::to_string()` 把 `/group/{name}/delay` 的响应直接显示出来（首次触发 `serde_json` 的**序列化器**，此前全仓库只用 `from_str`）。两者合计让二进制到 363,008 B（+19.5 KiB）。改为「下标对齐的 `Vec<Option<u32>>` + 只读 `history` 的数字」后回到 +4.5 KiB。
+- 期间试过、并**被实测否掉**的两条路：把延迟放进 `Snapshot` 的 `std::collections::HashMap`（把 SipHash/hashbrown 重新链进来，与 §11.7 的做法相反），以及用 `serde_json::Value::to_string()` 把 `/group/{name}/delay` 的响应直接显示出来（首次触发 `serde_json` 的**序列化器**，此前全仓库只用 `from_str`）。两者合计让二进制到 363,008 B（+19.5 KiB）。改为「只读 `history` 的数字 + `Vec<(String, Option<u32>)>`」后回到 +4.5 KiB。
 - 排序是第二块成本：`slice::sort_by_key`/`sort_by_cached_key` 会为 `(String, Option<u32>)` 再实例化一次标准库稳定排序，实测 **+4.1–4.6 KiB**；改写为十几行的稳定插入排序后该成本归零（组内节点数由 `MAX_ITEMS` 兜底）。
 - 由此固定的两条实现边界：**快照里不存测速结果**（数据源就是内核的 `history`，下一次 `/proxies` 自然带回来），以及**没有测量值时不重排**（mihomo 的 `all` 顺序就是配置顺序）。
 - **实现前后各读了一遍上游源码**（`hub/route/groups.go`、`adapter/outboundgroup/groupbase.go`、`adapter/adapter.go`、`constant/adapters.go`），改掉了三个凭印象写错的点：组测速是**并发**且 `timeout` 是**整组**截止（不是每节点 3 s，所以请求侧 30 s 是白等，改为 10 s）；`history` **始终存在**（未测速时是空数组，不是缺字段），失败的记录 `delay` 为 `0`；探测 URL 用 mihomo 自己的 `https` 默认值（它源码里警告 http 测试地址可能被机场劫持）。另外记下一条内核行为：组测速会**解固定** `URLTest`/`Fallback` 组。
+- **另一处只有真机能发现的坑**：`/proxies` **不含订阅节点**。本机 v1.19.31 的 `/proxies` 只有 9 个键（`COMPATIBLE`/`DIRECT`/`PASS`/`PASS-RULE`/`REJECT`/`REJECT-DROP` + 3 个分组），31 个订阅节点只出现在 `/providers/proxies`。第一版按「`/proxies` 里每个节点自己的 `history`」实现，于是正好对用户最在意的那些节点一个数字都不显示——**读文档不如对着运行中的控制器看一眼**，这条记进 §5 的调用表。
 
 ### 二进制体积复查（2026-09）
 
