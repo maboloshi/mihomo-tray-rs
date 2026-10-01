@@ -300,6 +300,16 @@ const DELAY_TEST_TIMEOUT_MS: u32 = 10_000;
 /// it belongs next to `ui.web_url` in `tray.yml`.
 const DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 
+/// How often the subscription's node list (with their latency) is read.
+///
+/// `GET /providers/proxies` carries every node together with its whole `history`,
+/// so it is far larger than `/proxies` and grows with the subscription — reading
+/// it on every poll would spend the tray's request budget on data that only
+/// changes when the kernel re-measures, which its own health check does every few
+/// minutes. A group test resets the deadline, so the numbers the user just asked
+/// for arrive with the very next refresh instead of up to this much later.
+const PROVIDER_LATENCY_REFRESH: Duration = Duration::from_secs(30);
+
 /// Everything an action needs besides the command itself.
 struct Worker<'a> {
     /// The controller to talk to. `None` while none could be resolved: the kernel
@@ -319,6 +329,11 @@ struct Worker<'a> {
     /// The kernel version, read once per client: a restarted kernel may be a new
     /// image, so the cache is dropped whenever the client is replaced.
     version: String,
+    /// The subscription nodes' latency, and when it was last read. Kept here
+    /// rather than in the snapshot because it is read on its own, slower cadence
+    /// (`PROVIDER_LATENCY_REFRESH`) and reused by the polls in between.
+    provider_latency: Vec<(String, Option<u32>)>,
+    provider_latency_at: Option<Instant>,
 }
 
 /// What bringing the kernel up left behind for the poll loop.
@@ -446,6 +461,8 @@ fn spawn_worker(
                 hwnd,
                 kernel: &kernel,
                 version: String::new(),
+                provider_latency: Vec::new(),
+                provider_latency_at: None,
             };
             // The kernel's own failure is the more specific one, so it wins over
             // a settings file that could not be read.
@@ -488,6 +505,8 @@ fn spawn_worker(
                     &settings.web_url,
                     &state,
                     &mut worker.version,
+                    &mut worker.provider_latency,
+                    &mut worker.provider_latency_at,
                     outcome.take(),
                 );
                 post(hwnd, win::WM_REFRESH);
@@ -524,6 +543,13 @@ fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
     // the client it replaces.
     if matches!(command, Command::RestartKernel) {
         return restart_kernel(worker);
+    }
+    // The kernel now has fresh measurements for the nodes that were tested, so
+    // the slower provider cadence is skipped for the refresh that follows: what
+    // the user just asked for shows up on the next poll instead of up to
+    // `PROVIDER_LATENCY_REFRESH` later. Done before the client is borrowed below.
+    if matches!(command, Command::SpeedTest(_)) {
+        worker.provider_latency_at = None;
     }
     let Some(client) = worker.client.as_ref() else {
         // Without a controller the process commands are still worth carrying out;
@@ -1016,6 +1042,8 @@ fn refresh(
     web_url: &str,
     shared: &Shared,
     version: &mut String,
+    provider_latency: &mut Vec<(String, Option<u32>)>,
+    provider_latency_at: &mut Option<Instant>,
     outcome: Outcome,
 ) {
     let previous = state::read(shared);
@@ -1045,9 +1073,23 @@ fn refresh(
                     *version = client.version().unwrap_or_default();
                 }
                 snapshot.version = version.clone();
-                if let Ok(groups) = client.proxies() {
-                    snapshot.groups = groups;
+                if let Ok(proxies) = client.proxies() {
+                    snapshot.groups = proxies.groups;
+                    snapshot.node_latency = proxies.latency;
                 }
+                // The subscription's nodes are only listed by
+                // `/providers/proxies`, which is far larger than `/proxies` and
+                // only changes when the kernel re-measures, so it is read on its
+                // own slower cadence and reused in between. A failed read is not
+                // reported: there is simply nothing to add to what `/proxies`
+                // gave, and a kernel without providers answers the same way.
+                if provider_latency_at.is_none_or(|at| at.elapsed() >= PROVIDER_LATENCY_REFRESH) {
+                    *provider_latency = client.provider_latency().unwrap_or_default();
+                    *provider_latency_at = Some(Instant::now());
+                }
+                snapshot
+                    .node_latency
+                    .extend(provider_latency.iter().cloned());
             }
             Err(error) => {
                 snapshot.controller_ok = false;
@@ -1193,6 +1235,8 @@ mod tests {
             hwnd: 0,
             kernel: &kernel,
             version: "mihomo v1.19.30 (old image)".to_string(),
+            provider_latency: Vec::new(),
+            provider_latency_at: None,
         };
 
         assert_eq!(restart_kernel(&mut worker), None);

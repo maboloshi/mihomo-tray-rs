@@ -18,16 +18,6 @@ pub struct Group {
     /// never report it.
     pub fixed: String,
     pub members: Vec<String>,
-    /// The latest latency `/proxies` reports for each member, index-aligned with
-    /// [`Group::members`]. `None` means the kernel has recorded no `history` for
-    /// that member (it was never tested); `Some(0)` is mihomo's "the test timed
-    /// out". Both are kept apart from a real measurement on purpose: the menu
-    /// shows a number only where there is one.
-    ///
-    /// A `Vec` rather than a map: this program measures its binary in kilobytes
-    /// and a `HashMap` would link the hashing machinery back in (`docs/DESIGN.md`
-    /// §11), while a group has a handful of members.
-    pub delays: Vec<Option<u32>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,6 +34,12 @@ pub struct Snapshot {
     pub autostart: bool,
     pub kernel_running: bool,
     pub groups: Vec<Group>,
+    /// `(node name, last delay the kernel measured)`, from `/proxies` and from
+    /// `/providers/proxies` — the subscription's nodes are only listed by the
+    /// latter. `None` means the kernel has recorded no measurement for that node
+    /// yet; `Some(0)` is a test that timed out or was refused. The menu shows a
+    /// number only where there is one, so the two never look alike.
+    pub node_latency: Vec<(String, Option<u32>)>,
     /// Last failed action (mode/TUN/select/reload, registry writes). Survives
     /// refreshes until the next action.
     pub action_error: Option<String>,

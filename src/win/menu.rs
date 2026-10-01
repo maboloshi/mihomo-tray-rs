@@ -289,7 +289,7 @@ fn add_members(
     // Latency only reorders a list that has been measured: mihomo's `all` array
     // is the order the configuration asked for, and reordering that because the
     // kernel has no `history` yet would be a change nobody asked for.
-    let mut entries = member_entries(group);
+    let mut entries = member_entries(group, snapshot);
     if entries.iter().any(|(_, delay)| delay.is_some()) {
         sort_by_delay(&mut entries);
     }
@@ -309,15 +309,24 @@ fn add_members(
     );
 }
 
-/// The group's members paired with the latency `/proxies` reports for each,
-/// index-aligned through [`Group::delays`].
-fn member_entries(group: &Group) -> Vec<(String, Option<u32>)> {
+/// The group's members paired with the latency the kernel last measured for each.
+fn member_entries(group: &Group, snapshot: &Snapshot) -> Vec<(String, Option<u32>)> {
     group
         .members
         .iter()
-        .enumerate()
-        .map(|(index, member)| (member.clone(), group.delays.get(index).copied().flatten()))
+        .map(|member| (member.clone(), lookup_delay(snapshot, member)))
         .collect()
+}
+
+/// The latency of a node, `None` while the kernel has measured none. A linear
+/// scan: the list holds one entry per node of the configuration, and a submenu
+/// looks its own members up once.
+fn lookup_delay(snapshot: &Snapshot, member: &str) -> Option<u32> {
+    snapshot
+        .node_latency
+        .iter()
+        .find(|(name, _)| name == member)
+        .and_then(|(_, delay)| *delay)
 }
 
 /// Where a member sorts. Measured nodes come first, fastest first; a node the
@@ -548,39 +557,32 @@ mod tests {
     };
 
     fn group(name: &str, switchable: bool, now: &str, members: &[&str]) -> Group {
-        group_with_delays(name, switchable, now, members, &[])
-    }
-
-    /// A group whose members carry the latencies `/proxies` reported for them.
-    /// `delays` is index-aligned with `members`; anything missing stays untested.
-    fn group_with_delays(
-        name: &str,
-        switchable: bool,
-        now: &str,
-        members: &[&str],
-        delays: &[Option<u32>],
-    ) -> Group {
-        let members: Vec<String> = members.iter().map(|m| m.to_string()).collect();
-        let delays = (0..members.len())
-            .map(|index| delays.get(index).copied().flatten())
-            .collect();
         Group {
             name: name.to_string(),
             kind: if switchable { "Selector" } else { "URLTest" }.to_string(),
             switchable,
             now: now.to_string(),
             fixed: String::new(),
-            members,
-            delays,
+            members: members.iter().map(|m| m.to_string()).collect(),
         }
     }
 
     fn snapshot(groups: Vec<Group>) -> Snapshot {
+        snapshot_with_latency(groups, &[])
+    }
+
+    /// A snapshot whose kernel has measured the given `(node, delay)` pairs.
+    /// A node with no delay listed here is one the kernel never tested.
+    fn snapshot_with_latency(groups: Vec<Group>, latency: &[(&str, Option<u32>)]) -> Snapshot {
         Snapshot {
             controller_ok: true,
             mode: "rule".to_string(),
             mixed_port: 7890,
             groups,
+            node_latency: latency
+                .iter()
+                .map(|(name, delay)| (name.to_string(), *delay))
+                .collect(),
             ..Default::default()
         }
     }
@@ -886,15 +888,14 @@ mod tests {
     fn measured_members_carry_their_latency_and_sort_fastest_first() {
         let messages = i18n::t();
         // Deliberately listed slowest-first, and with one node never tested and
-        // one that timed out.
-        let group = group_with_delays(
-            "Auto",
-            true,
-            "B",
-            &["Slow", "Fast", "Untested", "Dead"],
-            &[Some(400), Some(30), None, Some(0)],
+        // one that timed out. The numbers come from the snapshot, the way the
+        // worker publishes what `/proxies` and `/providers/proxies` reported.
+        let group = group("Auto", true, "B", &["Slow", "Fast", "Untested", "Dead"]);
+        let snapshot = snapshot_with_latency(
+            vec![group],
+            &[("Slow", Some(400)), ("Fast", Some(30)), ("Dead", Some(0))],
         );
-        let menu = Menu::build(&snapshot(vec![group]), &Settings::default());
+        let menu = Menu::build(&snapshot, &Settings::default());
         let groups = find_submenu(menu.handle, &i18n::t().menu_groups);
         let auto = find_submenu(groups, "Auto");
         let members: Vec<String> = labels(auto)

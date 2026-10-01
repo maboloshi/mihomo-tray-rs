@@ -49,6 +49,18 @@ pub enum ClientError {
     TlsUnsupported,
 }
 
+/// What `GET /proxies` answers with: the groups the menu is built from, and the
+/// latency of every entry it listed.
+#[derive(Debug, Default)]
+pub struct Proxies {
+    pub groups: Vec<Group>,
+    /// `(name, last measured delay)` for every entry, groups included. A `Vec`
+    /// rather than a map: the menu looks a handful of names up per submenu, and a
+    /// `HashMap` would link the hashing machinery back into a binary measured in
+    /// kilobytes (`docs/DESIGN.md` §11).
+    pub latency: Vec<(String, Option<u32>)>,
+}
+
 impl Client {
     /// Accepts `host:port` or `http://host:port`; rejects anything else, `https://`
     /// included.
@@ -265,12 +277,20 @@ impl Client {
         Ok((mode, mixed_port, tun))
     }
 
-    pub fn proxies(&self) -> Result<Vec<Group>, String> {
+    /// `GET /proxies`: the groups to build the menu from, and the latency of
+    /// every entry the controller listed.
+    pub fn proxies(&self) -> Result<Proxies, String> {
         let v = self.json("/proxies")?;
         let Some(map) = v["proxies"].as_object() else {
-            return Ok(Vec::new());
+            return Ok(Proxies::default());
         };
-        let mut groups = Vec::new();
+        let mut result = Proxies {
+            latency: map
+                .iter()
+                .map(|(name, entry)| (name.clone(), entry_delay(entry)))
+                .collect(),
+            ..Proxies::default()
+        };
         for (name, entry) in map {
             if entry["hidden"].as_bool().unwrap_or(false) {
                 continue;
@@ -279,28 +299,45 @@ impl Client {
                 continue; // a plain node, not a group
             };
             let kind = entry["type"].as_str().unwrap_or_default().to_string();
-            let members: Vec<String> = members
-                .iter()
-                .filter_map(|m| m.as_str().map(str::to_string))
-                .collect();
-            // `history` lives on the node, not on the group, and it only exists
-            // after that node was tested at least once (`docs/DESIGN.md` §5), so a
-            // member without one stays `None` instead of looking like 0 ms.
-            let delays = members
-                .iter()
-                .map(|member| node_delay(map, member))
-                .collect();
-            groups.push(Group {
+            result.groups.push(Group {
                 name: name.clone(),
                 switchable: is_switchable(&kind),
                 kind,
                 now: entry["now"].as_str().unwrap_or_default().to_string(),
                 fixed: entry["fixed"].as_str().unwrap_or_default().to_string(),
-                members,
-                delays,
+                members: members
+                    .iter()
+                    .filter_map(|m| m.as_str().map(str::to_string))
+                    .collect(),
             });
         }
-        Ok(groups)
+        Ok(result)
+    }
+
+    /// The latency of the nodes behind the subscription providers
+    /// (`GET /providers/proxies`).
+    ///
+    /// These nodes are **not** in `/proxies`: that map carries the built-in
+    /// adapters and the groups, while everything a subscription brought lives
+    /// here. A menu built only from `/proxies` therefore had no latency to show
+    /// for the nodes a user actually picks between.
+    pub fn provider_latency(&self) -> Result<Vec<(String, Option<u32>)>, String> {
+        let v = self.json("/providers/proxies")?;
+        let mut latency = Vec::new();
+        let Some(providers) = v["providers"].as_object() else {
+            return Ok(latency);
+        };
+        for provider in providers.values() {
+            let Some(nodes) = provider["proxies"].as_array() else {
+                continue;
+            };
+            for node in nodes {
+                if let Some(name) = node["name"].as_str() {
+                    latency.push((name.to_string(), entry_delay(node)));
+                }
+            }
+        }
+        Ok(latency)
     }
 
     /// Let a pinned `URLTest`/`Fallback` group choose for itself again
@@ -398,15 +435,15 @@ fn is_switchable(kind: &str) -> bool {
     matches!(kind, "Selector" | "URLTest" | "Fallback")
 }
 
-/// The latency mihomo last measured for a node, out of the whole `/proxies` map.
+/// The latency mihomo last measured for a node, out of one `/proxies` or
+/// `/providers/proxies` entry.
 ///
 /// `history` is a list of samples and only the last one describes the node as it
-/// is now; a member that was never tested has no list at all. mihomo records `0`
+/// is now; a node that was never tested carries an empty list. mihomo records `0`
 /// when the test timed out or was refused, which reaches the menu as "timeout"
 /// rather than as a suspicious 0 ms.
-fn node_delay(map: &serde_json::Map<String, Value>, member: &str) -> Option<u32> {
-    let history = map.get(member)?["history"].as_array()?;
-    let delay = history.last()?["delay"].as_u64()?;
+fn entry_delay(entry: &Value) -> Option<u32> {
+    let delay = entry["history"].as_array()?.last()?["delay"].as_u64()?;
     Some(delay.min(u32::MAX as u64) as u32)
 }
 
@@ -649,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn latency_comes_from_the_last_history_sample_of_each_member() {
+    fn latency_comes_from_the_last_history_sample_of_each_entry() {
         let server = spawn_server(
             200,
             "OK",
@@ -661,25 +698,69 @@ mod tests {
             }}"#,
         );
         let client = Client::new(&server.address(), "", 2000).unwrap();
-        let groups = client.proxies().unwrap();
-        let group = groups.iter().find(|g| g.name == "Group").expect("Group");
+        let proxies = client.proxies().unwrap();
+        let delay = |name: &str| {
+            proxies
+                .latency
+                .iter()
+                .find(|(node, _)| node == name)
+                .map(|(_, delay)| *delay)
+                .expect("entry is listed")
+        };
 
         assert_eq!(
-            group.delays,
-            vec![Some(42), Some(0), None, None],
-            "the newest sample wins, 0 is a timeout, and a node with no history is not 0ms"
+            delay("A"),
+            Some(42),
+            "the newest sample wins, not the first or the average"
         );
+        assert_eq!(delay("B"), Some(0), "a failed test is 0, not a latency");
+        assert_eq!(delay("C"), None, "an empty history is not 0ms");
         assert_eq!(
-            group.delays.len(),
-            group.members.len(),
-            "delays stay index-aligned with members"
+            delay("Group"),
+            None,
+            "groups carry their own history slot and it is empty here"
         );
+        // The groups the menu is built from are still there.
+        assert_eq!(proxies.groups.len(), 1);
+        assert_eq!(proxies.groups[0].name, "Group");
+    }
+
+    #[test]
+    fn provider_nodes_carry_the_latency_of_their_last_sample() {
+        // These nodes are not in `/proxies` at all: on a current kernel that map
+        // holds the built-in adapters and the groups, while a subscription's nodes
+        // are only listed here. Reading `/proxies` alone is why the menu had no
+        // latency to show.
+        let server = spawn_server(
+            200,
+            "OK",
+            r#"{"providers":{
+                "MyProvider":{"type":"Proxy","proxies":[
+                    {"name":"tokyo","type":"Trojan","history":[{"delay":125},{"delay":88}]},
+                    {"name":"osaka","type":"Trojan","history":[{"delay":0}]},
+                    {"name":"nowhere","type":"Trojan"}
+                ]},
+                "PROXY":{"type":"Compatible"}
+            }}"#,
+        );
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        let latency = client.provider_latency().unwrap();
+        assert_eq!(
+            latency,
+            vec![
+                ("tokyo".to_string(), Some(88)),
+                ("osaka".to_string(), Some(0)),
+                ("nowhere".to_string(), None),
+            ]
+        );
+        let sent = server.request();
+        assert_eq!(sent.path, "/providers/proxies");
     }
 
     #[test]
     fn delay_asks_the_controller_to_test_the_group() {
         // mihomo answers with a per-member delay map; the tray only needs to know
-        // the request was accepted, and reads the numbers back from `/proxies`.
+        // the request was accepted, and reads the numbers back afterwards.
         let server = spawn_server(200, "OK", r#"{"A":42,"B":0}"#);
         let client = Client::new(&server.address(), "", 2000).unwrap();
         client
@@ -720,7 +801,7 @@ mod tests {
             }}"#,
         );
         let client = Client::new(&server.address(), "", 2000).unwrap();
-        let groups = client.proxies().unwrap();
+        let groups = client.proxies().unwrap().groups;
 
         // The plain node and the hidden group are dropped.
         assert_eq!(groups.len(), 3);
