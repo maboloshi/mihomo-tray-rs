@@ -28,7 +28,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 
 ### 1.2 明确不做
 
-设置窗口、自绘弹窗、owner-draw 视觉、节点延迟色点、流量/内存曲线、订阅 provider 刷新、脚本执行、CFW 式的 HTML 界面。延迟本身以**原生菜单项的文本**呈现（§3.2），不为此引入 owner-draw。图形化设置不由本程序提供：交给内核自己的面板（`打开 Web 面板`），本程序只负责把地址交给默认浏览器。
+设置窗口、自绘弹窗、owner-draw 视觉、节点延迟色点、流量/内存曲线、脚本执行、CFW 式的 HTML 界面。延迟以**原生菜单项的文本**呈现（§3.2），订阅刷新是**普通子菜单 + 一次 API 调用**（§3.3），都不为此引入 owner-draw。图形化设置不由本程序提供：交给内核自己的面板（`打开 Web 面板`），本程序只负责把地址交给默认浏览器。
 
 ---
 
@@ -88,6 +88,7 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
 打开 Web 面板
 更多 ▶
    重载配置
+   刷新订阅 ▶                 ← 每个 HTTP/File 类 provider 一项，标签带「上次更新多久」
    关闭所有连接
    重启内核
    强制重启内核
@@ -105,6 +106,7 @@ Mihomo 状态: 运行中 (rule)        ← 灰显
 - **只读组**（`LoadBalance` 等）：整组不可点，项文本为 `名称 (类型)`。
 - **组排序**：`/proxies` 是 Go map→JSON，顺序即字典序，mihomo 不提供配置顺序。故 `GLOBAL` 固定置顶，其余按不区分大小写字典序；`tray.yml` 的 `groups.order/include/exclude` 可覆盖。
 - **菜单在每次右键时重建**：先同步拉 `/configs`（+ `/proxies`）再建菜单，数据永远新鲜；不依赖轮询快照。
+- **订阅刷新**：「更多 ▶ 刷新订阅」的每一项来自快照里的 provider 列表（读法与坑见 §3.3），只有 `HTTP`/`File` 类会出现；标签是「名称 (多久之前更新)」，点击 `PUT /providers/proxies/{name}`。
 
 ### 3.1 长列表（节点很多的分组）
 
@@ -151,6 +153,18 @@ SetMenuInfo(hmenu, &mi);
 - **排序**：只在**有测量值**时按延迟升序（无测量值的排最后、保持内核给的顺序）；没有 `history` 时保持 mihomo `all` 数组的原序——那是配置里的顺序，不该因为没测速就被改掉。排序用自己写的插入排序：标准库的稳定排序是「每个元素类型实例化一次」的大函数，`ordered_groups` 已经付过一次，再来一次实测约 4 KiB，而一个组只有几十个节点。
 - **不引入 `HashMap`**：延迟是快照里的 `Vec<(节点名, Option<u32>)>`（§11 记录过 `HashMap` 会把哈希表代码重新链进来，是主动砍掉的 4.5 KiB），菜单按名字线性查找——一个子菜单只查自己的成员一次。
 
+### 3.3 订阅刷新（2026-10）
+
+「更多 ▶ 刷新订阅」列出内核的 proxy-provider，点一个即 `PUT /providers/proxies/{name}`：内核在**请求内**重新读该 provider 的源（`hub/route/provider.go` 的 `updateProvider` → `provider.Update()`），成功回 `204`、读不到回 `503` + 它自己的原因。
+
+- **只列 `HTTP`/`File`**：也只有这两类会去重读源。`adapter/provider/provider.go` 里 `proxySetProvider.Update()` 走 `Fetcher.Update()`（HTTP 重新下载、File 重读文件），而 `compatibleProvider.Update()` 直接 `return nil`、`inlineProvider.Update()` 只把时间戳设成 `time.Now()`。本机实测 `GET /providers/proxies` 返回三项：`MyProvider`（HTTP，31 节点）+ 内核内置的 `PROXY`/`default`（Compatible，`updatedAt` 是 Go 零值 `0001-01-01T00:00:00Z`），按此规则菜单里只出现 `MyProvider`。
+- **标签**：`名称 (5 分钟前)` / `(2 小时前)` / `(3 天前)`；零值时间（从未更新）显示 `(从未更新)`，一分钟内显示 `(刚刚)`。阈值与措辞都在 `src/i18n.rs`（`menu_provider_updated`），负数（时钟回拨、或刚刷新完的 `updatedAt` 比取快照时的 now 还新）按 `(刚刚)` 处理。
+- **时间怎么算**：`updatedAt` 是 RFC 3339（本机实测 `2026-10-01T16:40:02.7094989+08:00`），**手写解析**成 Unix 秒（`src/mihomo/api.rs` 的 `rfc3339_epoch`：严格校验字段与范围，含 offset 与闰年），因此只做减法、与内核所在时区无关，也不为它引入日期库（§11）。
+- **不新增请求**：provider 名单、`updatedAt` 与订阅节点的延迟来自**同一个** `GET /providers/proxies`，也就是 §3.2 那条 30 s 节奏的读（`Client::providers` 一次返回两者）。
+- **请求侧超时**：内核给自己的下载留 20 s（`component/resource/vehicle.go` 的 `DefaultHttpTimeout`），比 `controller.timeout_ms` 的 2 s 大得多，所以刷新有专属的 30 s（`PROVIDER_REFRESH_TIMEOUT_MS`，与测速那条是同类处理）。实测本机 31 节点订阅刷新耗时 **2.1 s**。
+- **结果怎么回来**：与测速一样，命令本身不回传数据 —— 刷新后把 provider 缓存置空，下一次轮询立刻重读，新节点与新的 `updatedAt` 就出现在菜单与延迟标签里；期间状态行显示「正在刷新订阅 X…」。内核重启/被替换后缓存同样置空：旧内核的 provider 不是新内核的证据。
+- **实测（本机 v1.19.32，2026-10）**：本程序的客户端解析真实响应得到 3 个 provider（其中 1 个可刷新）+ 37 个带延迟的节点；`PUT /providers/proxies/MyProvider` 由同一个 WinHTTP 客户端发出返回 `Ok`，`updatedAt` 随即变为当前时间。
+
 ---
 
 ## 4. 内核、配置与控制器来自哪里
@@ -188,7 +202,8 @@ SetMenuInfo(hmenu, &mi);
 | 重载配置 | `PUT /configs?force=true`，body `{"path":""}` | **空 body 会 400**；不带 `force` 不重建 inbound；`path` 为空时 mihomo 回落到自己启动时的配置文件 |
 | 重启内核 | `POST /restart` | 先回 `200 {"status":"ok"}` 再关进程，所以"响应成功"**不等于**内核已经起来，必须再探活；Windows 上内核用 `exec.Command`+`os.Exit` 以**自己的 argv 与环境**重建进程，因此提权保持、地址不变，但也意味着"别人的内核"重启后仍然是别人的（设置仍不可知） |
 | 分组与节点 | `GET /proxies` | 顺序=字典序；`all` 非空的即分组；**只有内置适配器与分组，订阅节点不在这里**（见下一行）；`history` 未测速时是空数组 |
-| 订阅节点 | `GET /providers/proxies` | `providers.<名>.proxies[]` 才列出订阅的节点及其 `history`；响应比 `/proxies` 大得多且随订阅规模增长，按较慢节奏读（§3.2） |
+| 订阅节点 | `GET /providers/proxies` | `providers.<名>.proxies[]` 才列出订阅的节点及其 `history`；响应比 `/proxies` 大得多且随订阅规模增长，按较慢节奏读（§3.2）。同一响应里的 `vehicleType` / `updatedAt` 是「刷新订阅」的菜单数据（§3.3）；Compatible 类的 `updatedAt` 是 Go 零值时间 |
+| 刷新订阅 | `PUT /providers/proxies/{urlencode(name)}` | 内核在请求里**同步**重读该 provider，成功 `204`、失败 `503` + 内核自己的原因；只有 HTTP/File 类真的重读源（Compatible 立即返回、Inline 只盖时间戳）。内核给自己的下载留 20 s，比 `controller.timeout_ms` 大得多 → 请求侧单独放宽到 30 s（§3.3）。响应不带数据，新节点与新的 `updatedAt` 由下一次 `GET /providers/proxies` 读回 |
 | 切换节点 | `PUT /proxies/{urlencode(group)}` `{"name":"member"}` | 组名/成员名必须 percent-encode（中文必需）；仅 `Selector`/`URLTest`/`Fallback` 可写，其余返回 400 |
 | 取消固定 | `DELETE /proxies/{urlencode(group)}` | 只对非 `Selector` 的可写组有效（内核 `ForceSet("")`） |
 | 测速 | `GET /group/{name}/delay?timeout=3000&url=…` | 成员**并发**测、3 s 是**整个组**的截止（不是每个节点）；全失败回 `504`。响应 `{"成员":延迟}` 只说明谁回来了，真正的数据落在各节点的 `history`，由 `GET /proxies` + `GET /providers/proxies` 读回（§3.2）。请求侧单独放宽（本程序 10 s），不能用 `controller.timeout_ms`。**对 `URLTest`/`Fallback` 组会先解固定**。探测 URL 用 mihomo 自己的默认值（`https://www.gstatic.com/generate_204`）：内核源码里明确警告 http 测试地址可能被机场劫持而测失败 |
@@ -344,6 +359,16 @@ ui:
 - 由此固定的两条实现边界：**快照里不存测速结果**（数据源就是内核的 `history`，下一次 `/proxies` 自然带回来），以及**没有测量值时不重排**（mihomo 的 `all` 顺序就是配置顺序）。
 - **实现前后各读了一遍上游源码**（`hub/route/groups.go`、`adapter/outboundgroup/groupbase.go`、`adapter/adapter.go`、`constant/adapters.go`），改掉了三个凭印象写错的点：组测速是**并发**且 `timeout` 是**整组**截止（不是每节点 3 s，所以请求侧 30 s 是白等，改为 10 s）；`history` **始终存在**（未测速时是空数组，不是缺字段），失败的记录 `delay` 为 `0`；探测 URL 用 mihomo 自己的 `https` 默认值（它源码里警告 http 测试地址可能被机场劫持）。另外记下一条内核行为：组测速会**解固定** `URLTest`/`Fallback` 组。
 - **另一处只有真机能发现的坑**：`/proxies` **不含订阅节点**。本机 v1.19.31 的 `/proxies` 只有 9 个键（`COMPATIBLE`/`DIRECT`/`PASS`/`PASS-RULE`/`REJECT`/`REJECT-DROP` + 3 个分组），31 个订阅节点只出现在 `/providers/proxies`。第一版按「`/proxies` 里每个节点自己的 `history`」实现，于是正好对用户最在意的那些节点一个数字都不显示——**读文档不如对着运行中的控制器看一眼**，这条记进 §5 的调用表。
+
+### 订阅 provider 刷新（2026-10）
+
+「更多 ▶ 刷新订阅」（§3.3），实测量体积 **349,184 B → 354,816 B（+5,632 B）**，单测 97 → 103。
+
+- **体积去向**：`Provider`/`Providers` 两个类型、手写 RFC 3339 → Unix 秒的解析（含 `days_from_civil`、月份/闰年校验，约 60 行）、菜单标签、7 条文案（中英各一份）。与节点延迟那条的 +6,144 B 同量级——都换来一个原生菜单项，仍远低于 owner-draw 那条链（§3.2 的 15–35 KiB 估）。
+- **为什么手写日期解析**：只为把 `updatedAt` 换成相对时间就引入日期库不划算（与 §2 放弃 HTTP 库、§11.7 放弃 `HashMap` 是同一取舍）。解析严格校验字段与范围，15 条非法输入进了单测。
+- **为什么是相对时间而不是绝对时间**：绝对时间要按本机时区渲染（要么开 `Win32_System_Time` 用 `SystemTimeToTzSpecificLocalTime`，要么假定内核与本机同区）；相对时间只把 RFC 3339 的 offset 减掉，与内核时区无关，也正好回答"这个订阅有多旧"。
+- **失败不再清缓存**：`/providers/proxies` 读失败时保留上一次结果（此前一律换成空）。上一份数据是几十秒前、同一个内核的读数，保留它比让菜单里所有 provider 一起消失更诚实；这条同样是「刷新订阅」点名要用的数据。
+- **真机核对**（v1.19.32）：解析真实响应得到 3 个 provider（1 个 HTTP 可刷新 + 2 个 Compatible 零值）+ 37 个带延迟的节点；`PUT /providers/proxies/MyProvider` 由本程序的 WinHTTP 客户端发出返回 `Ok`，耗时 2.1 s，`updatedAt` 随即变成当前时间。**只有对着运行中的控制器跑一次才能确认**的事：Compatible 的 `updatedAt` 是零值（不是缺字段，`omitempty` 对 `time.Time` 无效）、`PUT` 无 body 也被内核接受。
 
 ### 二进制体积复查（2026-09）
 
