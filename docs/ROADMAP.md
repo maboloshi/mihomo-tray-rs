@@ -9,7 +9,7 @@ Phase 1（MVP）已实现并真机验证：
 - 菜单功能全部可用（状态行 / 系统代理 / 代理模式 / TUN / 代理分组（含「测速本组节点」与节点延迟文本）/ 刷新订阅 / 开机自启动 / 重载配置 / 打开 Web 面板 / 退出两项）
 - 内核自发现（同目录/`bin`/`core` → `PATH`，只搜 `mihomo.exe` 这个名字，命中 Scoop shim 时按 `mihomo.shim` 的 `path` 换成真内核；`mihomo.path` 填了就只认它，改名内核也支持），配置/控制器按 mihomo 自己的规则解析（`mihomo.home`/`config` 或内核带来的那份 + 运行内核的 argv → 环境变量 → 配置文件 → `controller.*` 兜底），没有端口探测；「配置文件里没有 `external-controller`、地址由命令行或环境变量注入」的机器同样能定位
 - `cargo fmt --check`、`cargo clippy --release --all-targets`（0 warning）、`cargo test --release` 全绿（103 个单测）
-- 实测（0.2.1，rustc 1.98.0）：exe 354,816 B（≈346.5 KiB，含 2026-10 的「刷新订阅」；该功能前用同一工具链在临时 worktree 里重编为 349,184 B，即 **+5.5 KiB** —— 更早记在本行的 347,648 B 是过时读数，节点延迟那次记录见 [DESIGN.md](DESIGN.md) §11）；空闲私有内存 2.2 MB（私有工作集）、工作集 ~15 MB（冷启动 20 s 的读数，见 [README.md](../README.md)）
+- 实测（0.3.0，rustc 1.98.0）：exe 355,328 B（≈347.0 KiB；同工具链下 0.2.1 为 354,816 B，本次 **+512 B**）。增量来源的历史读数：「刷新订阅」相对其前身用同一工具链在临时 worktree 里重编的 349,184 B 为 **+5.5 KiB**，节点延迟那次记录见 [DESIGN.md](DESIGN.md) §11；更早记在本行的 347,648 B 是过时读数。空闲私有内存 2.2 MB（私有工作集）、工作集 ~15 MB（冷启动 20 s 的读数，见 [README.md](../README.md)）
 - 验证方式：真机运行截图 [`app-menu-light.png`](assets/app-menu-light.png) / [`app-menu-dark.png`](assets/app-menu-dark.png) + 分组数据逐项比对 live API + 长列表滚动箭头（[`native-menu-scroll-arrows.png`](assets/native-menu-scroll-arrows.png)）
 - 人工验证（2026-09）：清单 **#1–#12、#16 通过**，**#13–#15 待验证**；2026-10 新增的 #18（刷新订阅）已真机点过、与预期一致；唯一与预期不符的是 #2 的长列表滚动方式（只有「点击/按住箭头 + 方向键」能用，见下节）
 
