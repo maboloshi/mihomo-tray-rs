@@ -106,7 +106,14 @@ fn render(color: [u8; 3], size: usize) -> Vec<u8> {
     let radius = big as f32 / 2.0 - SS as f32;
     let outline = radius - SS as f32 * 1.2;
     let dot = radius * 0.34;
-    let dark = [color[0] * 3 / 5, color[1] * 3 / 5, color[2] * 3 / 5];
+    // The outline is 60% of the fill colour. The arithmetic is widened to `u16`
+    // because `0xFF * 3` does not fit in a `u8`, which would panic as soon as
+    // overflow checks are on.
+    let dark = [
+        (color[0] as u16 * 3 / 5) as u8,
+        (color[1] as u16 * 3 / 5) as u8,
+        (color[2] as u16 * 3 / 5) as u8,
+    ];
 
     // Premultiplied accumulation, so edges do not fade towards black.
     let mut acc = vec![0u32; size * size * 4];
