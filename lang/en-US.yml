@@ -41,6 +41,12 @@ menu:
   speed_test: Speed-test this group
   member_delay: {name} ({ms}ms)
   member_timeout: {name} (timeout)
+  refresh_providers: Refresh subscription
+  provider_never: {name} (never updated)
+  provider_just_now: {name} (just now)
+  provider_minutes: {name} ({n} min ago)
+  provider_hours: {name} ({n} h ago)
+  provider_days: {name} ({n} d ago)
   more: More
   exit: Exit
   exit_stop_kernel: Exit and stop Mihomo
@@ -59,6 +65,7 @@ status:
   elevating_kernel: Restarting the kernel as administrator…
   elevating_stop: Stopping the kernel as administrator…
   speed_testing: Speed-testing {group}…
+  refreshing_provider: Refreshing {name}…
 
 state:
   on: on

@@ -9,7 +9,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::i18n;
 use crate::settings::Settings;
-use crate::state::{Group, Snapshot};
+use crate::state::{Group, Provider, Snapshot};
 
 const ID_BASE: usize = 100;
 const MAX_DEPTH: usize = 4;
@@ -35,6 +35,8 @@ pub enum Action {
     ForceRestartKernel,
     /// Measure node latency for a group (`GET /group/{name}/delay`).
     SpeedTest(String),
+    /// Fetch one subscription provider again (`PUT /providers/proxies/{name}`).
+    RefreshProvider(String),
     /// Open the kernel's dashboard (or a hosted one pointed at it) in the
     /// browser. The tray itself has no settings window, so this is where the
     /// rest of mihomo is configured.
@@ -146,6 +148,37 @@ impl Menu {
             Action::Reload,
             false,
             ready,
+        );
+        // One entry per subscription. The label carries how old the nodes in use
+        // are, which is the question this submenu answers; what a click does is
+        // re-download that provider. Only vehicles with a source to read again are
+        // listed (`Provider::refreshable`), and the controller is what performs
+        // the refresh, so an unreachable one leaves the whole submenu out of reach.
+        let providers: Vec<&Provider> = snapshot
+            .providers
+            .iter()
+            .filter(|provider| provider.refreshable())
+            .collect();
+        let providers_menu = builder.new_menu();
+        let now = unix_now();
+        for provider in &providers {
+            builder.item(
+                providers_menu,
+                &provider_label(provider, now),
+                Action::RefreshProvider(provider.name.clone()),
+                false,
+                ready,
+            );
+        }
+        if providers.is_empty() {
+            builder.plain(providers_menu, &messages.menu_empty, false);
+        }
+        builder.popup(
+            more_menu,
+            &messages.menu_refresh_providers,
+            providers_menu,
+            ready && !providers.is_empty(),
+            false,
         );
         builder.item(
             more_menu,
@@ -523,6 +556,26 @@ fn member_label(member: &str, delay: Option<u32>) -> String {
     }
 }
 
+/// A subscription provider in the refresh submenu: its name, and how long ago
+/// the kernel last fetched it. The age is computed here and turned into words by
+/// the message table, so the label never carries a raw timestamp.
+fn provider_label(provider: &Provider, now: i64) -> String {
+    let name = menu_text(&provider.name);
+    let age = provider
+        .updated_at
+        .map(|updated| now.saturating_sub(updated));
+    i18n::t().menu_provider_updated(&name, age)
+}
+
+/// Seconds since the Unix epoch — the clock mihomo's `updatedAt` is in, and the
+/// only one that can be subtracted from it without a time-zone rule.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
+
 fn menu_text(s: &str) -> String {
     // `&` is a mnemonic marker inside a menu string, and control characters (a
     // NUL in particular) would truncate the visible label while the action still
@@ -841,6 +894,7 @@ mod tests {
             labels(more),
             vec![
                 messages.menu_reload.to_string(),
+                messages.menu_refresh_providers.to_string(),
                 messages.menu_close_connections.to_string(),
                 messages.menu_restart_kernel.to_string(),
                 messages.menu_force_restart_kernel.to_string(),
@@ -875,9 +929,10 @@ mod tests {
             let id = (ID_BASE + index) as u32;
             let grayed = unsafe { GetMenuState(more, id, MF_BYCOMMAND) } & MF_GRAYED != 0;
             match action {
-                Action::Reload | Action::CloseConnections | Action::RestartKernel => {
-                    assert!(grayed, "{action:?}")
-                }
+                Action::Reload
+                | Action::CloseConnections
+                | Action::RestartKernel
+                | Action::RefreshProvider(_) => assert!(grayed, "{action:?}"),
                 Action::ForceRestartKernel => assert!(!grayed, "{action:?}"),
                 _ => {}
             }
@@ -987,6 +1042,124 @@ mod tests {
         assert!(
             index.is_none(),
             "an unreachable controller offers no speed test"
+        );
+    }
+
+    #[test]
+    fn the_refresh_submenu_lists_only_providers_with_a_source_to_read_again() {
+        let messages = i18n::t();
+        let now = unix_now();
+        let provider = |name: &str, vehicle: &str, updated_at: Option<i64>| Provider {
+            name: name.to_string(),
+            vehicle: vehicle.to_string(),
+            updated_at,
+        };
+        let subscribed = Snapshot {
+            controller_ok: true,
+            providers: vec![
+                provider("MyProvider", "HTTP", Some(now - 5 * 60)),
+                provider("Local", "File", Some(now - 3 * 86_400)),
+                // A Compatible provider has nothing to download and an Inline one
+                // only restamps its own time, so neither is offered here.
+                provider("PROXY", "Compatible", None),
+                provider("Inline", "Inline", Some(now)),
+            ],
+            ..Default::default()
+        };
+        let menu = Menu::build(&subscribed, &Settings::default());
+        let more = find_submenu(menu.handle, &messages.menu_more);
+        let refresh = find_submenu(more, &messages.menu_refresh_providers);
+        assert!(!refresh.is_null(), "refresh submenu missing");
+        assert_eq!(
+            labels(refresh),
+            vec![
+                messages.menu_provider_updated("MyProvider", Some(5 * 60)),
+                messages.menu_provider_updated("Local", Some(3 * 86_400)),
+            ],
+            "only providers with a source are listed, each with how old it is"
+        );
+
+        // The click says which provider to fetch.
+        let index = menu
+            .actions
+            .iter()
+            .position(
+                |action| matches!(action, Action::RefreshProvider(name) if name == "MyProvider"),
+            )
+            .expect("the refresh entry exists");
+        assert_eq!(
+            unsafe { GetMenuState(refresh, (ID_BASE + index) as u32, MF_BYCOMMAND) } & MF_GRAYED,
+            0,
+            "a reachable controller leaves the entry clickable"
+        );
+
+        // Refreshing is a controller call: without one the submenu cannot be opened.
+        let offline = Snapshot {
+            controller_ok: false,
+            ..subscribed
+        };
+        let offline = Menu::build(&offline, &Settings::default());
+        let more = find_submenu(offline.handle, &messages.menu_more);
+        let position = submenu_position(more, &messages.menu_refresh_providers).expect("submenu");
+        assert_ne!(
+            unsafe { GetMenuState(more, position as u32, MF_BYPOSITION) } & MF_GRAYED,
+            0,
+            "an unreachable controller offers no refresh"
+        );
+
+        // A kernel with no subscription at all has nothing to refresh.
+        let bare = Menu::build(&snapshot(Vec::new()), &Settings::default());
+        let more = find_submenu(bare.handle, &messages.menu_more);
+        let refresh = find_submenu(more, &messages.menu_refresh_providers);
+        assert_eq!(labels(refresh), vec![messages.menu_empty.to_string()]);
+        let position = submenu_position(more, &messages.menu_refresh_providers).expect("submenu");
+        assert_ne!(
+            unsafe { GetMenuState(more, position as u32, MF_BYPOSITION) } & MF_GRAYED,
+            0,
+            "an empty provider list leaves nothing to open"
+        );
+    }
+
+    #[test]
+    fn provider_ages_are_told_in_the_unit_that_fits() {
+        let messages = i18n::t();
+        assert_eq!(
+            messages.menu_provider_updated("P", None),
+            messages.menu_provider_never("P")
+        );
+        assert_eq!(
+            messages.menu_provider_updated("P", Some(0)),
+            messages.menu_provider_just_now("P")
+        );
+        assert_eq!(
+            messages.menu_provider_updated("P", Some(59)),
+            messages.menu_provider_just_now("P"),
+            "under a minute is not '0 minutes ago'"
+        );
+        assert_eq!(
+            messages.menu_provider_updated("P", Some(60)),
+            messages.menu_provider_minutes("P", "1")
+        );
+        assert_eq!(
+            messages.menu_provider_updated("P", Some(3_599)),
+            messages.menu_provider_minutes("P", "59")
+        );
+        assert_eq!(
+            messages.menu_provider_updated("P", Some(3_600)),
+            messages.menu_provider_hours("P", "1")
+        );
+        assert_eq!(
+            messages.menu_provider_updated("P", Some(86_399)),
+            messages.menu_provider_hours("P", "23")
+        );
+        assert_eq!(
+            messages.menu_provider_updated("P", Some(86_400)),
+            messages.menu_provider_days("P", "1")
+        );
+        // A clock that runs backwards must not produce a negative age.
+        assert_eq!(
+            messages.menu_provider_updated("P", Some(-5)),
+            messages.menu_provider_just_now("P")
         );
     }
 

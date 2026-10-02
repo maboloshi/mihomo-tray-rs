@@ -77,6 +77,12 @@ messages! {
     menu_speed_test => "menu.speed_test",
     menu_member_delay_tpl => "menu.member_delay",
     menu_member_timeout_tpl => "menu.member_timeout",
+    menu_refresh_providers => "menu.refresh_providers",
+    menu_provider_never_tpl => "menu.provider_never",
+    menu_provider_just_now_tpl => "menu.provider_just_now",
+    menu_provider_minutes_tpl => "menu.provider_minutes",
+    menu_provider_hours_tpl => "menu.provider_hours",
+    menu_provider_days_tpl => "menu.provider_days",
     menu_more => "menu.more",
     menu_exit => "menu.exit",
     menu_exit_stop_kernel => "menu.exit_stop_kernel",
@@ -95,6 +101,7 @@ messages! {
     status_elevating_kernel => "status.elevating_kernel",
     status_elevating_stop => "status.elevating_stop",
     status_speed_testing_tpl => "status.speed_testing",
+    status_refreshing_provider_tpl => "status.refreshing_provider",
     state_on => "state.on",
     state_off => "state.off",
     tooltip_kernel_tpl => "tooltip.kernel",
@@ -210,6 +217,60 @@ impl Messages {
 
     pub fn menu_member_timeout(&self, name: &str) -> String {
         self.fill(&self.menu_member_timeout_tpl, &[("name", name)])
+    }
+
+    /// A subscription provider in the refresh submenu, with how long ago it was
+    /// last fetched (`None` for one that never was).
+    ///
+    /// Which unit an age is told in is part of the sentence, not of the caller,
+    /// so the thresholds live here next to the words they choose between.
+    pub fn menu_provider_updated(&self, name: &str, age_seconds: Option<i64>) -> String {
+        let Some(age) = age_seconds.map(|age| age.max(0)) else {
+            return self.menu_provider_never(name);
+        };
+        if age < 60 {
+            self.menu_provider_just_now(name)
+        } else if age < 3_600 {
+            self.menu_provider_minutes(name, &(age / 60).to_string())
+        } else if age < 86_400 {
+            self.menu_provider_hours(name, &(age / 3_600).to_string())
+        } else {
+            self.menu_provider_days(name, &(age / 86_400).to_string())
+        }
+    }
+
+    /// A provider the kernel has never fetched. mihomo reports Go's zero time
+    /// there, which is not a date to show.
+    pub fn menu_provider_never(&self, name: &str) -> String {
+        self.fill(&self.menu_provider_never_tpl, &[("name", name)])
+    }
+
+    pub fn menu_provider_just_now(&self, name: &str) -> String {
+        self.fill(&self.menu_provider_just_now_tpl, &[("name", name)])
+    }
+
+    pub fn menu_provider_minutes(&self, name: &str, minutes: &str) -> String {
+        self.fill(
+            &self.menu_provider_minutes_tpl,
+            &[("name", name), ("n", minutes)],
+        )
+    }
+
+    pub fn menu_provider_hours(&self, name: &str, hours: &str) -> String {
+        self.fill(
+            &self.menu_provider_hours_tpl,
+            &[("name", name), ("n", hours)],
+        )
+    }
+
+    pub fn menu_provider_days(&self, name: &str, days: &str) -> String {
+        self.fill(&self.menu_provider_days_tpl, &[("name", name), ("n", days)])
+    }
+
+    /// Refreshing a provider re-downloads the subscription, which takes as long
+    /// as the download does, so the status line says what is running.
+    pub fn status_refreshing_provider(&self, name: &str) -> String {
+        self.fill(&self.status_refreshing_provider_tpl, &[("name", name)])
     }
 
     /// A group test is synchronous and takes seconds, so the status line says
@@ -411,6 +472,12 @@ static ZH_CN: Messages = Messages {
     menu_speed_test: Cow::Borrowed("测速本组节点"),
     menu_member_delay_tpl: Cow::Borrowed("{name} ({ms}ms)"),
     menu_member_timeout_tpl: Cow::Borrowed("{name} (超时)"),
+    menu_refresh_providers: Cow::Borrowed("刷新订阅"),
+    menu_provider_never_tpl: Cow::Borrowed("{name} (从未更新)"),
+    menu_provider_just_now_tpl: Cow::Borrowed("{name} (刚刚)"),
+    menu_provider_minutes_tpl: Cow::Borrowed("{name} ({n} 分钟前)"),
+    menu_provider_hours_tpl: Cow::Borrowed("{name} ({n} 小时前)"),
+    menu_provider_days_tpl: Cow::Borrowed("{name} ({n} 天前)"),
     menu_more: Cow::Borrowed("更多"),
     menu_exit: Cow::Borrowed("退出"),
     menu_exit_stop_kernel: Cow::Borrowed("退出并停止 Mihomo"),
@@ -428,6 +495,7 @@ static ZH_CN: Messages = Messages {
     status_elevating_kernel: Cow::Borrowed("正在以管理员身份重启内核…"),
     status_elevating_stop: Cow::Borrowed("正在以管理员权限停止内核…"),
     status_speed_testing_tpl: Cow::Borrowed("正在测速 {group}…"),
+    status_refreshing_provider_tpl: Cow::Borrowed("正在刷新订阅 {name}…"),
     state_on: Cow::Borrowed("开"),
     state_off: Cow::Borrowed("关"),
     tooltip_kernel_tpl: Cow::Borrowed("内核: mihomo {version}"),
@@ -526,6 +594,12 @@ static EN_US: Messages = Messages {
     menu_speed_test: Cow::Borrowed("Speed-test this group"),
     menu_member_delay_tpl: Cow::Borrowed("{name} ({ms}ms)"),
     menu_member_timeout_tpl: Cow::Borrowed("{name} (timeout)"),
+    menu_refresh_providers: Cow::Borrowed("Refresh subscription"),
+    menu_provider_never_tpl: Cow::Borrowed("{name} (never updated)"),
+    menu_provider_just_now_tpl: Cow::Borrowed("{name} (just now)"),
+    menu_provider_minutes_tpl: Cow::Borrowed("{name} ({n} min ago)"),
+    menu_provider_hours_tpl: Cow::Borrowed("{name} ({n} h ago)"),
+    menu_provider_days_tpl: Cow::Borrowed("{name} ({n} d ago)"),
     menu_more: Cow::Borrowed("More"),
     menu_exit: Cow::Borrowed("Exit"),
     menu_exit_stop_kernel: Cow::Borrowed("Exit and stop Mihomo"),
@@ -545,6 +619,7 @@ static EN_US: Messages = Messages {
     status_elevating_kernel: Cow::Borrowed("Restarting the kernel as administrator…"),
     status_elevating_stop: Cow::Borrowed("Stopping the kernel as administrator…"),
     status_speed_testing_tpl: Cow::Borrowed("Speed-testing {group}…"),
+    status_refreshing_provider_tpl: Cow::Borrowed("Refreshing {name}…"),
     state_on: Cow::Borrowed("on"),
     state_off: Cow::Borrowed("off"),
     tooltip_kernel_tpl: Cow::Borrowed("Kernel: mihomo {version}"),

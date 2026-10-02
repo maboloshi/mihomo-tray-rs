@@ -20,6 +20,30 @@ pub struct Group {
     pub members: Vec<String>,
 }
 
+/// One subscription provider, as `GET /providers/proxies` describes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Provider {
+    pub name: String,
+    /// mihomo's `vehicleType`: where the provider gets its nodes from.
+    pub vehicle: String,
+    /// Seconds since the Unix epoch of the last successful update, `None` for a
+    /// provider that reports mihomo's zero time because it never updated.
+    pub updated_at: Option<i64>,
+}
+
+impl Provider {
+    /// Whether refreshing this provider changes anything.
+    ///
+    /// mihomo implements `Update()` once per vehicle
+    /// (`adapter/provider/provider.go`): `HTTP` downloads the subscription again
+    /// and `File` re-reads the file, while `Compatible` returns immediately and
+    /// `Inline` only stamps a new time. Offering those two would be a menu entry
+    /// that reports success and does nothing.
+    pub fn refreshable(&self) -> bool {
+        matches!(self.vehicle.as_str(), "HTTP" | "File")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     /// Controller answered `GET /`.
@@ -40,6 +64,10 @@ pub struct Snapshot {
     /// yet; `Some(0)` is a test that timed out or was refused. The menu shows a
     /// number only where there is one, so the two never look alike.
     pub node_latency: Vec<(String, Option<u32>)>,
+    /// The subscription providers the kernel serves, with the time each was last
+    /// updated. Read together with `node_latency`: both come from the same
+    /// `GET /providers/proxies`, on the same slower cadence.
+    pub providers: Vec<Provider>,
     /// Last failed action (mode/TUN/select/reload, registry writes). Survives
     /// refreshes until the next action.
     pub action_error: Option<String>,

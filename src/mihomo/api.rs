@@ -10,7 +10,7 @@ use windows_sys::Win32::Networking::WinHttp::{
 };
 
 use crate::i18n;
-use crate::state::Group;
+use crate::state::{Group, Provider};
 
 /// How long a liveness probe gets. Probing is not a request: a local controller
 /// answers in milliseconds, and a machine where a refused loopback connection
@@ -58,6 +58,14 @@ pub struct Proxies {
     /// rather than a map: the menu looks a handful of names up per submenu, and a
     /// `HashMap` would link the hashing machinery back into a binary measured in
     /// kilobytes (`docs/DESIGN.md` §11).
+    pub latency: Vec<(String, Option<u32>)>,
+}
+
+/// What `GET /providers/proxies` answers with: the subscription providers, and
+/// the latency of every node they list.
+#[derive(Debug, Default)]
+pub struct Providers {
+    pub providers: Vec<Provider>,
     pub latency: Vec<(String, Option<u32>)>,
 }
 
@@ -314,30 +322,65 @@ impl Client {
         Ok(result)
     }
 
-    /// The latency of the nodes behind the subscription providers
+    /// The providers behind the subscriptions and the latency of their nodes
     /// (`GET /providers/proxies`).
     ///
     /// These nodes are **not** in `/proxies`: that map carries the built-in
     /// adapters and the groups, while everything a subscription brought lives
     /// here. A menu built only from `/proxies` therefore had no latency to show
     /// for the nodes a user actually picks between.
-    pub fn provider_latency(&self) -> Result<Vec<(String, Option<u32>)>, String> {
+    ///
+    /// The providers themselves are listed in the order the JSON map hands them
+    /// over (serde_json's map is sorted by key), not in the configuration order
+    /// mihomo read them in — the name is the only key either side agrees on.
+    pub fn providers(&self) -> Result<Providers, String> {
         let v = self.json("/providers/proxies")?;
-        let mut latency = Vec::new();
+        let mut result = Providers::default();
         let Some(providers) = v["providers"].as_object() else {
-            return Ok(latency);
+            return Ok(result);
         };
-        for provider in providers.values() {
+        for (name, provider) in providers {
+            result.providers.push(Provider {
+                name: name.clone(),
+                vehicle: provider["vehicleType"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                // A provider that never updated reports Go's zero time, which is
+                // two millennia of "not yet" rather than a date to show.
+                updated_at: provider["updatedAt"]
+                    .as_str()
+                    .and_then(rfc3339_epoch)
+                    .filter(|seconds| *seconds > 0),
+            });
             let Some(nodes) = provider["proxies"].as_array() else {
                 continue;
             };
             for node in nodes {
                 if let Some(name) = node["name"].as_str() {
-                    latency.push((name.to_string(), entry_delay(node)));
+                    result.latency.push((name.to_string(), entry_delay(node)));
                 }
             }
         }
-        Ok(latency)
+        Ok(result)
+    }
+
+    /// Ask mihomo to fetch one subscription provider again
+    /// (`PUT /providers/proxies/{name}`).
+    ///
+    /// The kernel re-reads the subscription inside the request handler and
+    /// answers when it is done (`hub/route/provider.go` calls
+    /// `provider.Update()`), so this is an ordinary request that happens to be
+    /// slow: mihomo gives its own download a 20 s budget
+    /// (`resource.DefaultHttpTimeout`), which is far more than the configured
+    /// request timeout. `204` means the provider now holds what the
+    /// subscription serves; a source that cannot be read answers `503` with
+    /// mihomo's own reason. There is nothing to hand back to the UI: the new
+    /// nodes and the new `updatedAt` arrive with the next
+    /// [`Client::providers`].
+    pub fn refresh_provider(&self, name: &str) -> Result<(), String> {
+        let path = format!("/providers/proxies/{}", percent_encode(name));
+        self.body_of("PUT", &path, None).map(|_| ())
     }
 
     /// Let a pinned `URLTest`/`Fallback` group choose for itself again
@@ -445,6 +488,113 @@ fn is_switchable(kind: &str) -> bool {
 fn entry_delay(entry: &Value) -> Option<u32> {
     let delay = entry["history"].as_array()?.last()?["delay"].as_u64()?;
     Some(delay.min(u32::MAX as u64) as u32)
+}
+
+/// Seconds since the Unix epoch of an RFC 3339 timestamp, `None` for anything
+/// that is not one.
+///
+/// Hand-written, like the rest of the JSON reading: a date library would dwarf a
+/// client measured in kilobytes (`docs/DESIGN.md` §11). mihomo marshals its
+/// `updatedAt` with Go's default layout — `2026-10-01T16:40:02.7094989+08:00` —
+/// and the offset is subtracted here, so the caller compares two instants and
+/// not two wall clocks: the kernel's time zone never enters the answer.
+fn rfc3339_epoch(text: &str) -> Option<i64> {
+    let (date, rest) = text.split_once('T')?;
+    let date = date.as_bytes();
+    if date.len() != 10 || date[4] != b'-' || date[7] != b'-' {
+        return None;
+    }
+    let year = digits(&date[0..4])?;
+    let month = digits(&date[5..7])?;
+    let day = digits(&date[8..10])?;
+
+    let time = rest.as_bytes();
+    if time.len() < 8 || time[2] != b':' || time[5] != b':' {
+        return None;
+    }
+    let hour = digits(&time[0..2])?;
+    let minute = digits(&time[3..5])?;
+    let second = digits(&time[6..8])?;
+
+    // Fractional seconds are not part of the answer and are dropped.
+    let mut tail = &time[8..];
+    if tail.first() == Some(&b'.') {
+        let fraction = tail[1..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if fraction == 0 {
+            return None;
+        }
+        tail = &tail[1 + fraction..];
+    }
+    let offset = match tail {
+        [b'Z' | b'z'] => 0,
+        [
+            sign @ (b'+' | b'-'),
+            hours_1,
+            hours_2,
+            b':',
+            minutes_1,
+            minutes_2,
+        ] => {
+            let hours = digits(&[*hours_1, *hours_2])?;
+            let minutes = digits(&[*minutes_1, *minutes_2])?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            let seconds = hours as i64 * 3_600 + minutes as i64 * 60;
+            if *sign == b'-' { -seconds } else { seconds }
+        }
+        _ => return None,
+    };
+
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year as i64, month) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some(
+        days_from_civil(year as i64, month, day) * 86_400
+            + hour as i64 * 3_600
+            + minute as i64 * 60
+            + second as i64
+            - offset,
+    )
+}
+
+/// The number an all-digit run spells, `None` for an empty run or any non-digit.
+fn digits(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value: u32 = 0;
+    for byte in bytes {
+        value = value * 10 + (*byte as char).to_digit(10)?;
+    }
+    Some(value)
+}
+
+/// Days from 1970-01-01 to `year-month-day` in the proleptic Gregorian calendar
+/// (Howard Hinnant's `days_from_civil`: no lookup table, and leap years fall out
+/// of the arithmetic instead of being special-cased).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    // March is month 0 here, which is what puts the leap day at the end.
+    let month_prime = (month as i64 + 9) % 12;
+    let day_of_year = (153 * month_prime + 2) / 5 + day as i64 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    }
 }
 
 /// Percent-encode everything outside the RFC 3986 unreserved set (group names
@@ -735,26 +885,140 @@ mod tests {
             200,
             "OK",
             r#"{"providers":{
-                "MyProvider":{"type":"Proxy","proxies":[
+                "MyProvider":{"type":"Proxy","vehicleType":"HTTP","updatedAt":"2026-10-01T16:40:02.7094989+08:00","proxies":[
                     {"name":"tokyo","type":"Trojan","history":[{"delay":125},{"delay":88}]},
                     {"name":"osaka","type":"Trojan","history":[{"delay":0}]},
                     {"name":"nowhere","type":"Trojan"}
                 ]},
-                "PROXY":{"type":"Compatible"}
+                "PROXY":{"type":"Proxy","vehicleType":"Compatible","updatedAt":"0001-01-01T00:00:00Z"}
             }}"#,
         );
         let client = Client::new(&server.address(), "", 2000).unwrap();
-        let latency = client.provider_latency().unwrap();
+        let providers = client.providers().unwrap();
         assert_eq!(
-            latency,
+            providers.latency,
             vec![
                 ("tokyo".to_string(), Some(88)),
                 ("osaka".to_string(), Some(0)),
                 ("nowhere".to_string(), None),
             ]
         );
+        // The provider list rides along on the same request, so the menu can offer
+        // a refresh per provider without a second call.
+        assert_eq!(
+            providers
+                .providers
+                .iter()
+                .map(|provider| (
+                    provider.name.as_str(),
+                    provider.vehicle.as_str(),
+                    provider.updated_at,
+                    provider.refreshable()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "MyProvider",
+                    "HTTP",
+                    Some(1_790_844_002),
+                    // 2026-10-01T16:40:02+08:00 == 08:40:02Z on the same day.
+                    true
+                ),
+                // The zero time is "never updated", not a date to render, and a
+                // Compatible provider has no source to read again.
+                ("PROXY", "Compatible", None, false),
+            ]
+        );
         let sent = server.request();
         assert_eq!(sent.path, "/providers/proxies");
+    }
+
+    #[test]
+    fn refreshing_a_provider_puts_its_encoded_name() {
+        // mihomo re-downloads the subscription inside the request and answers 204.
+        let server = spawn_server(204, "No Content", "");
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        client.refresh_provider("我的订阅").unwrap();
+
+        let sent = server.request();
+        assert_eq!(sent.method, "PUT");
+        assert_eq!(
+            sent.path,
+            "/providers/proxies/%E6%88%91%E7%9A%84%E8%AE%A2%E9%98%85"
+        );
+        assert_eq!(sent.body, "");
+    }
+
+    #[test]
+    fn a_provider_that_cannot_be_read_reports_the_kernels_reason() {
+        // The kernel answers 503 with its own error text when the subscription
+        // cannot be fetched; that text is the whole answer and must survive.
+        let server = spawn_server(
+            503,
+            "Service Unavailable",
+            r#"{"message":"Get \"https://example.invalid/sub\": dial tcp: timeout"}"#,
+        );
+        let client = Client::new(&server.address(), "", 2000).unwrap();
+        let error = client.refresh_provider("MyProvider").unwrap_err();
+        assert!(error.contains("503"), "unexpected error: {error}");
+        assert!(error.contains("timeout"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn parsed_timestamps_are_instants_not_wall_clocks() {
+        // The offset is applied, so the same instant written in three zones is
+        // the same second: this is what keeps "3 minutes ago" independent of the
+        // time zone the kernel runs in.
+        assert_eq!(
+            rfc3339_epoch("2026-10-01T16:40:02+08:00"),
+            Some(1_790_844_002)
+        );
+        assert_eq!(rfc3339_epoch("2026-10-01T08:40:02Z"), Some(1_790_844_002));
+        assert_eq!(
+            rfc3339_epoch("2026-10-01T03:40:02-05:00"),
+            Some(1_790_844_002)
+        );
+        // Fractions are dropped, not rounded into the next second.
+        assert_eq!(
+            rfc3339_epoch("2026-10-01T16:40:02.7094989+08:00"),
+            Some(1_790_844_002)
+        );
+        // Go's zero time, and the epoch itself: both mean "no update ever".
+        assert_eq!(rfc3339_epoch("0001-01-01T00:00:00Z"), Some(-62_135_596_800));
+        assert_eq!(rfc3339_epoch("1970-01-01T00:00:00Z"), Some(0));
+        // A leap day is a real date, and the day before it is one day earlier.
+        assert_eq!(rfc3339_epoch("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        assert_eq!(
+            rfc3339_epoch("2024-03-01T00:00:00Z"),
+            rfc3339_epoch("2024-02-29T00:00:00Z").map(|seconds| seconds + 86_400)
+        );
+    }
+
+    #[test]
+    fn dates_that_are_not_timestamps_are_refused() {
+        for text in [
+            "",
+            "not a date",
+            // Missing offset: an instant cannot be read off a wall clock alone.
+            "2026-10-01T16:40:02",
+            "2026-10-01T16:40:02.",
+            "2026-10-01T16:40:02+08",
+            "2026-10-01T16:40:02+0800",
+            // Out of range fields, including a day February does not have.
+            "2026-13-01T00:00:00Z",
+            "2026-10-32T00:00:00Z",
+            "2023-02-29T00:00:00Z",
+            "2026-10-01T24:00:00Z",
+            "2026-10-01T16:60:02Z",
+            "2026-10-01T16:40:60Z",
+            "2026-10-01T16:40:02+24:00",
+            // Separators in the wrong places.
+            "2026/10/01T16:40:02Z",
+            "2026-10-01 16:40:02Z",
+            "2026-10-01T16-40-02Z",
+        ] {
+            assert_eq!(rfc3339_epoch(text), None, "{text:?} is not a timestamp");
+        }
     }
 
     #[test]

@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::i18n;
 use crate::icon::{Icons, State};
-use crate::mihomo::{Client, discover, proc};
+use crate::mihomo::{Client, Providers, discover, proc};
 use crate::settings::Settings;
 use crate::state::{self, KernelSlot, Shared, Snapshot};
 use crate::win::{self, menu::Action};
@@ -39,6 +39,9 @@ pub enum Command {
     StopKernelElevated,
     /// Measure node latency (`GET /group/{name}/delay`).
     SpeedTest(String),
+    /// Download one subscription provider again
+    /// (`PUT /providers/proxies/{name}`).
+    RefreshProvider(String),
     /// Re-read everything (used after actions handled on the UI thread).
     Refresh,
 }
@@ -171,6 +174,9 @@ impl App {
             // controller: the command runs even when none could be resolved.
             Action::ForceRestartKernel => self.send(Command::ForceRestartKernel),
             Action::SpeedTest(group) => self.send(Command::SpeedTest(group.clone())),
+            Action::RefreshProvider(provider) => {
+                self.send(Command::RefreshProvider(provider.clone()))
+            }
             Action::OpenWebUi => {
                 // The entry is only clickable while the controller answers, and
                 // the refresh that proves that is the one that published this
@@ -310,6 +316,17 @@ const DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 /// for arrive with the very next refresh instead of up to this much later.
 const PROVIDER_LATENCY_REFRESH: Duration = Duration::from_secs(30);
 
+/// How long refreshing a subscription is given from this side.
+///
+/// mihomo downloads the subscription inside the request (`provider.Update()`),
+/// and gives that download a 20 s budget of its own
+/// (`resource.DefaultHttpTimeout`), so the configured request timeout — 2 s by
+/// default — would abandon the refresh while the kernel was still fetching and
+/// report a failure for an update that was about to succeed. This is the
+/// kernel's own budget plus room for the round trip. The worker is blocked while
+/// it waits, which is what the status note is for.
+const PROVIDER_REFRESH_TIMEOUT_MS: u32 = 30_000;
+
 /// Everything an action needs besides the command itself.
 struct Worker<'a> {
     /// The controller to talk to. `None` while none could be resolved: the kernel
@@ -329,11 +346,12 @@ struct Worker<'a> {
     /// The kernel version, read once per client: a restarted kernel may be a new
     /// image, so the cache is dropped whenever the client is replaced.
     version: String,
-    /// The subscription nodes' latency, and when it was last read. Kept here
-    /// rather than in the snapshot because it is read on its own, slower cadence
-    /// (`PROVIDER_LATENCY_REFRESH`) and reused by the polls in between.
-    provider_latency: Vec<(String, Option<u32>)>,
-    provider_latency_at: Option<Instant>,
+    /// The subscription providers and their nodes' latency, and when they were
+    /// last read. Kept here rather than in the snapshot because they are read on
+    /// their own, slower cadence (`PROVIDER_LATENCY_REFRESH`) and reused by the
+    /// polls in between.
+    providers: Providers,
+    providers_at: Option<Instant>,
 }
 
 /// What bringing the kernel up left behind for the poll loop.
@@ -461,8 +479,8 @@ fn spawn_worker(
                 hwnd,
                 kernel: &kernel,
                 version: String::new(),
-                provider_latency: Vec::new(),
-                provider_latency_at: None,
+                providers: Providers::default(),
+                providers_at: None,
             };
             // The kernel's own failure is the more specific one, so it wins over
             // a settings file that could not be read.
@@ -505,8 +523,8 @@ fn spawn_worker(
                     &settings.web_url,
                     &state,
                     &mut worker.version,
-                    &mut worker.provider_latency,
-                    &mut worker.provider_latency_at,
+                    &mut worker.providers,
+                    &mut worker.providers_at,
                     outcome.take(),
                 );
                 post(hwnd, win::WM_REFRESH);
@@ -548,8 +566,11 @@ fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
     // the slower provider cadence is skipped for the refresh that follows: what
     // the user just asked for shows up on the next poll instead of up to
     // `PROVIDER_LATENCY_REFRESH` later. Done before the client is borrowed below.
-    if matches!(command, Command::SpeedTest(_)) {
-        worker.provider_latency_at = None;
+    //
+    // A refresh is the same story from the other side: the provider's `updatedAt`
+    // and its node list both change, and the menu label has to say so at once.
+    if matches!(command, Command::SpeedTest(_) | Command::RefreshProvider(_)) {
+        worker.providers_at = None;
     }
     let Some(client) = worker.client.as_ref() else {
         // Without a controller the process commands are still worth carrying out;
@@ -590,6 +611,27 @@ fn execute(worker: &mut Worker, command: &Command) -> Option<String> {
                 Some(i18n::t().status_speed_testing(group)),
             );
             let result = probe.delay(group, DELAY_TEST_URL);
+            show_note(worker.state, worker.hwnd, None);
+            result
+        }
+        // A subscription download has the kernel's own fetch budget inside it
+        // (`PROVIDER_REFRESH_TIMEOUT_MS`), so it gets a request budget of its
+        // own for the same reason a group test does.
+        //
+        // As with a group test, nothing is published here: the new nodes and the
+        // new `updatedAt` are read back by the refresh that follows, which is
+        // also what makes the menu label true again.
+        Command::RefreshProvider(name) => {
+            let probe = Client {
+                timeout_ms: PROVIDER_REFRESH_TIMEOUT_MS,
+                ..client.clone()
+            };
+            show_note(
+                worker.state,
+                worker.hwnd,
+                Some(i18n::t().status_refreshing_provider(name)),
+            );
+            let result = probe.refresh_provider(name);
             show_note(worker.state, worker.hwnd, None);
             result
         }
@@ -642,8 +684,11 @@ fn restart_kernel(worker: &mut Worker) -> Option<String> {
     }
     let answered = wait_for_controller(worker.client.as_ref());
     show_note(worker.state, worker.hwnd, None);
-    // A restart may be how a new binary is picked up.
+    // A restart may be how a new binary is picked up — and with it a different set
+    // of subscriptions, so a cached provider read is no longer evidence about the
+    // kernel that answered.
     worker.version.clear();
+    worker.providers_at = None;
     if answered {
         None
     } else {
@@ -787,8 +832,11 @@ fn elevate_replacement(worker: &mut Worker, pid: u32, args: &[String]) -> Option
 /// controller the new kernel does not serve must not be kept: it belonged to the
 /// kernel that was just replaced.
 fn adopt_new_kernel(worker: &mut Worker) -> Option<String> {
-    // A replacement may be how a new binary is picked up.
+    // A replacement may be how a new binary is picked up, and it is certainly a
+    // kernel with its own subscriptions: neither the version nor the providers
+    // read from the old one describe this one.
     worker.version.clear();
+    worker.providers_at = None;
     let path = state::kernel_path(worker.kernel);
     match discover::find_controller(worker.settings, path.as_deref()) {
         Ok(client) => worker.client = Some(client),
@@ -1042,8 +1090,8 @@ fn refresh(
     web_url: &str,
     shared: &Shared,
     version: &mut String,
-    provider_latency: &mut Vec<(String, Option<u32>)>,
-    provider_latency_at: &mut Option<Instant>,
+    providers: &mut Providers,
+    providers_at: &mut Option<Instant>,
     outcome: Outcome,
 ) {
     let previous = state::read(shared);
@@ -1077,19 +1125,24 @@ fn refresh(
                     snapshot.groups = proxies.groups;
                     snapshot.node_latency = proxies.latency;
                 }
-                // The subscription's nodes are only listed by
+                // The subscription's providers — their nodes, their latency and
+                // when each was last updated — are only listed by
                 // `/providers/proxies`, which is far larger than `/proxies` and
-                // only changes when the kernel re-measures, so it is read on its
-                // own slower cadence and reused in between. A failed read is not
-                // reported: there is simply nothing to add to what `/proxies`
-                // gave, and a kernel without providers answers the same way.
-                if provider_latency_at.is_none_or(|at| at.elapsed() >= PROVIDER_LATENCY_REFRESH) {
-                    *provider_latency = client.provider_latency().unwrap_or_default();
-                    *provider_latency_at = Some(Instant::now());
+                // only changes when the kernel re-measures or a subscription is
+                // fetched again, so it is read on its own slower cadence and
+                // reused in between. A failed read keeps the last good answer
+                // rather than emptying the menu: the previous one described the
+                // same providers, seconds ago.
+                if providers_at.is_none_or(|at| at.elapsed() >= PROVIDER_LATENCY_REFRESH) {
+                    if let Ok(read) = client.providers() {
+                        *providers = read;
+                    }
+                    *providers_at = Some(Instant::now());
                 }
+                snapshot.providers = providers.providers.clone();
                 snapshot
                     .node_latency
-                    .extend(provider_latency.iter().cloned());
+                    .extend(providers.latency.iter().cloned());
             }
             Err(error) => {
                 snapshot.controller_ok = false;
@@ -1235,8 +1288,8 @@ mod tests {
             hwnd: 0,
             kernel: &kernel,
             version: "mihomo v1.19.30 (old image)".to_string(),
-            provider_latency: Vec::new(),
-            provider_latency_at: None,
+            providers: Providers::default(),
+            providers_at: None,
         };
 
         assert_eq!(restart_kernel(&mut worker), None);
@@ -1248,6 +1301,10 @@ mod tests {
         assert!(state::take_kernel_child(&kernel).is_none());
         // A different image may be running now, and the version is read once.
         assert!(worker.version.is_empty());
+        assert!(
+            worker.providers_at.is_none(),
+            "the providers read from the old kernel are not this kernel's"
+        );
         assert!(worker.client.is_some(), "the controller stays usable");
     }
 
