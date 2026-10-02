@@ -368,7 +368,7 @@ ui:
 - **为什么手写日期解析**：只为把 `updatedAt` 换成相对时间就引入日期库不划算（与 §2 放弃 HTTP 库、§11.7 放弃 `HashMap` 是同一取舍）。解析严格校验字段与范围，15 条非法输入进了单测。
 - **为什么是相对时间而不是绝对时间**：绝对时间要按本机时区渲染（要么开 `Win32_System_Time` 用 `SystemTimeToTzSpecificLocalTime`，要么假定内核与本机同区）；相对时间只把 RFC 3339 的 offset 减掉，与内核时区无关，也正好回答"这个订阅有多旧"。
 - **失败不再清缓存**：`/providers/proxies` 读失败时保留上一次结果（此前一律换成空）。上一份数据是几十秒前、同一个内核的读数，保留它比让菜单里所有 provider 一起消失更诚实；这条同样是「刷新订阅」点名要用的数据。
-- **真机核对**（v1.19.32）：解析真实响应得到 3 个 provider（1 个 HTTP 可刷新 + 2 个 Compatible 零值）+ 37 个带延迟的节点；`PUT /providers/proxies/MyProvider` 由本程序的 WinHTTP 客户端发出返回 `Ok`，耗时 2.1 s，`updatedAt` 随即变成当前时间。**只有对着运行中的控制器跑一次才能确认**的事：Compatible 的 `updatedAt` 是零值（不是缺字段，`omitempty` 对 `time.Time` 无效）、`PUT` 无 body 也被内核接受。
+- **真机核对**（v1.19.32）：解析真实响应得到 3 个 provider（1 个 HTTP 可刷新 + 2 个 Compatible 零值）+ 37 个带延迟的节点；`PUT /providers/proxies/MyProvider` 由本程序的 WinHTTP 客户端发出返回 `Ok`，耗时 2.1 s，`updatedAt` 随即变成当前时间。**只有对着运行中的控制器跑一次才能确认**的事：Compatible 的 `updatedAt` 是零值（不是缺字段，`omitempty` 对 `time.Time` 无效）、`PUT` 无 body 也被内核接受。菜单路径本身同样真机点过（清单 #18，2026-10，与预期一致）。
 
 ### 二进制体积复查（2026-09）
 
