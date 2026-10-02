@@ -50,7 +50,7 @@ cargo test                 # 设置解析 / URL 编码 / 地址解析的单测
 
 ## 设置文件
 
-`tray.yml`：**exe 同目录优先**（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`。首次运行会按当前界面语言写出模板，也可以直接从仓库复制 [`tray_Sample_zh.yml`](tray_Sample_zh.yml) / [`tray_Sample_en.yml`](tray_Sample_en.yml)。
+`tray.yml`：**exe 同目录优先**（便携），否则 `%APPDATA%\mihomo-tray\tray.yml`。首次运行会按当前界面语言写出模板，也可以直接从仓库复制 [`assets/tray_Sample_zh.yml`](assets/tray_Sample_zh.yml) / [`assets/tray_Sample_en.yml`](assets/tray_Sample_en.yml)。
 
 - **路径必须绝对**：盘符路径（`C:\...`）或 UNC 路径（`\\server\share\...`）；`%NAME%` 按 cmd 的规则展开。相对路径和 `~` 会被拒绝——内核会拿相对路径去拼它的工作目录，那个目录不是任何人选的。
 - 同目录那份**必须有内容**才算数：scoop 清单会建一个 0 字节的 `tray.yml`，空文件（以及读不到的文件）会回退 `%APPDATA%`。打包时请把示例装成 `tray.yml`，不要建空文件。
