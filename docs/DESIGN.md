@@ -42,7 +42,7 @@ Windows 系统托盘工具，用 Rust 管理本机 [mihomo](https://github.com/M
 | JSON | `serde_json`（只用 `Value`，不引 derive） | 字段少，手取值即可 |
 | 设置文件 | 手写极简 YAML 子集解析 | 文件由本程序定义，子集受限已足够；省约 100 KB 与一个依赖 |
 | 注册表 | `winreg` 0.56 | 纯 Rust、无 `windows` crate 依赖、API 直接 |
-| 图标 | `CreateIconIndirect` 由代码生成 RGBA | 0 依赖；不做纯色方块（多尺寸 16/20/24/32 + 描边 + 状态色） |
+| 图标 | `CreateIconIndirect` 由代码生成 RGBA | 0 依赖；不做纯色方块（多尺寸 16/20/24/32 + 描边 + 状态色外圈 + 模式色中心盘） |
 | 深色菜单 | 清单 + `uxtheme` 序号 135/133/136 + `SetWindowTheme(hwnd,"DarkMode_Explorer")` | 已实测可强制深色；`WM_SETTINGCHANGE`(`ImmersiveColorSet`) 时重算并 `FlushMenuThemes`，运行中切换系统主题即时生效；失败时降级浅色菜单，不影响功能 |
 
 **体积/内存实测**（`opt-level="z"`、`lto`、`codegen-units=1`、`panic="abort"`、`strip`，无 UPX，x64）：
@@ -294,7 +294,7 @@ ui:
 ## 8. 状态与错误策略
 
 - 状态来源优先级：controller 实时值 > `tray.yml` > 默认值。`mixed-port` 从 `GET /configs` 取（系统代理指向它），不解析 yml。
-- 图标四态（优先序）：TUN=蓝 > 系统代理开=橙 > 内核可用=绿 > 控制器不可达=灰。注册表说系统代理开着但内核不应答时仍是灰——那才是这一刻真正要看见的状态；「内核可用」和两种接管方式是三件事，所以三个颜色。
+- 图标两层（优先序）：**外圈填充色**＝接管状态，TUN=蓝 > 系统代理开=橙 > 内核可用=绿 > 控制器不可达=灰；**中心点**＝代理模式，`rule`=原来的浅色点（填充色与白 72% 混合，即还没有模式概念之前那个点，绿色环上是 `#CDE9CE`）/ `global`=红 `#E53935` / `direct`=近黑 `#212121`，模式未知（控制器不可达，或内核报了不认识的值）时**不画中心点**，只剩状态色圆盘。注册表说系统代理开着但内核不应答时外圈仍是灰——那才是这一刻真正要看见的状态；「内核可用」和两种接管方式是三件事，所以三个颜色。两个轴正交：任何模式都能落在任何接管状态上，模式永远不改变外圈的优先级。中心点半径＝0.34 × 外圈半径（**沿用原尺寸，图标形状不变**）：16 px 图标上约 2.4 设备像素，落在屏幕上就是中心那 1 个像素加一圈混合边，`global` 与 `direct` 因此在 100% DPI 下比 `rule` 更紧——这是「不改图标轮廓」的代价。`global` 的砖红是量出来的而不是挑出来的：纯红 `#C00000` 的色度是 84，而四个外圈色只有 40–80、`rule` 的浅点只有 17，所以它在 16 px 里是全场最艳的一点，看着像贴上去的；但一味压色度也不行——`#BC5A52`（色度 45）的亮度只比橙环低 22，切到系统代理时两个暖色糊成一片，模式标记正好在最需要分辨的状态上看不见。最后定下的是 **`#E53935`**（色度 78、比橙环低 20、离 `direct` ΔE 87）。注意它比 `#BC5A52` 的橙环亮度差**更小**，按下面那条阈值本该在「会糊」的区间里——是**真机实测推翻了这个阈值**：模拟图只是模拟图，托盘上看着清楚才算数。阈值因此记作参考而非判据：**与橙环的亮度差 ≥ ~28**、**色度 ≤ ~70**、**离 `direct` 的 ΔE ≥ ~60**；三个候选（`#BC5A52` 太柔 / `#B53026` 可读但发闷 / `#C00000` 太冲）都实机看过，`#E53935` 是留下的那个。
 - 控制器不可达：状态行 `控制器不可达`，模式/TUN/分组项灰显；不自动重启内核（避免和外部管理方式打架），仅当 `mihomo.auto_start` 且进程确实不存在时才拉起。
 - TUN 开启后回读仍为 `false` → 内核没有管理员权限：启动自身的提权副本（`--kernel-start-elevated <pid>`）重启内核后重试；再失败则 tooltip 提示「TUN 未生效（通常需要管理员权限）」。取消 UAC 报「提权启动被取消或失败」，且此时旧内核还没被终止。
 - 提权副本只从 PID 读**映像**，绝不接受调用方给的映像路径：映像与（start 模式的）命令行都从那个进程读（`NtQueryInformationProcess(ProcessCommandLineInformation)`，见 §5）。**不看映像名**——内核可以改名（`mihomo.path` 是可配置的），而名字检查本来就拦不住谁（调用方能把文件命名成 `mihomo.exe`），只挡误用（PID 复用）。否则副本就等于一个"UAC 弹窗写着本程序、实际以管理员身份运行任意程序"的提权原语。读不到命令行时报「无法读取内核自己的启动参数，未重启内核」并放弃本次重启。**替换助手** `--kernel-replace-elevated <pid> <参数…>` 是唯一的例外，而且只在**参数**上例外：它的目的就是让内核换成"本程序会启动的那一个"，参数不可能来自被替换的进程；映像仍从 PID 读（所以提权场景下只换配置、不换 binary），参数由托盘给出——`tray.yml` 的唯一可读者是托盘（提权副本以另一个账户运行时未必看得见它），让它自己读反而会两边不一致。参数通道不是安全边界：能改 `tray.yml` 的攻击者本来就能让 mihomo 执行任意动作，把住的只能是映像通道。
@@ -342,10 +342,10 @@ ui:
 
 1. **当前项用 ✔ 而不是 ●**：模式与分组当前值统一用 `MF_CHECKED`（用户要求「当前节点打对钩」），因此不需要 `MFT_RADIOCHECK`。分组的当前值是嵌套子组时，**子菜单项本身也带 ✔**（`MF_POPUP | MF_CHECKED`）。
 2. **worker 先刷新再等待**：原实现先 `recv_timeout(poll)` 再刷新，导致首个菜单（3 s 前打开）显示空状态；现改为循环开头立刻刷新，实现中实测发现并修复。
-3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`（`Icons::new` 与 `TaskbarCreated` 重注册时各量一次，主显示器 DPI 变化后重画而不是沿用旧尺寸），无资源文件、无图像库。
+3. **图标由代码生成**：`CreateIconIndirect` + 32bpp DIB，4× 超采样画圆环与中心点，尺寸取 `SM_CXSMICON`（`Icons::new` 与 `TaskbarCreated` 重注册时各量一次，主显示器 DPI 变化后按新尺寸重画而不是把小位图拉大——`app.manifest` 是 `permonitorv2`，125/150/200% 下拿到的就是原生 20/24/32 px），无资源文件、无图像库。`Icons` 预建 **4 态 × 4 模式 = 16 个** `HICON`（`icons[mode][state]`），`for_state(state, mode)` 查表；`Drop` 遍历释放。模式由 `Mode::from_str` 从 `GET /configs` 的 `mode` 解析，只认 `rule`/`global`/`direct`，其余（含空串）一律 `Unknown`——猜一个模式比不显示更糟。
 4. **非 `Selector` 组也带类型**：`自动选择 (URLTest)`；早期版本按「`type == "Selector"` 才可切换」把 `URLTest`/`Fallback` 一起灰显了，实测这两个组在内核里同样接受 `PUT /proxies/{name}`，故改为按 `SelectAble` 判据、并补上「已固定 / 取消固定」。
 5. **实测体积/内存**：exe 329.0 KB（336,896 B；2026-09 体积复查后的数字，复查前 389.0 KB / 398,336 B，见本节「二进制体积复查」），空闲私有内存 ~2.6–3.4 MB、工作集 ~15–18 MB（WinHTTP 内部线程已计入）。`serde_json` 实测约 33 KB，其余为 std 基线与本程序代码。
-6. **单测 89 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"）、并断言托盘给提权副本的那条命令行经 `CommandLineToArgvW` 往返后逐字不变（含尾反斜杠与空参数），图标层断言当前尺寸与 `SM_CXSMICON` 一致；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板就是 `build.rs` 的生成物（比对构建脚本盖进二进制的指纹，手改生成段即失败）且逐条等于内置英文表、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言内核候选链的顺序与"真 binary 优先于 shim"、配置候选的顺序（捆绑根 → 内核同目录 → mihomo 默认）与存在性挑选、控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
+6. **单测 114 个**：HTTP 层用 `TcpListener` 起本地假控制器，走真实 WinHTTP 断言 method/path/body/Authorization/错误码（含 `https://` 地址被拒），进程层对真实进程断言映像路径可读（含"起始缓冲不够就翻倍"）、并断言托盘给提权副本的那条命令行经 `CommandLineToArgvW` 往返后逐字不变（含尾反斜杠与空参数），图标层断言当前尺寸与 `SM_CXSMICON` 一致、16 个组合两两不同且都有句柄、中心像素逐位等于该模式的颜色（16/20/24/32/64 px 上各验一遍）、`rule` 的中心仍是原来那个 `mix(fill, white, 0.72)` 浅点、未知模式中心＝填充色、0.34 倍半径在 16 px 上确实落在中心那几个像素里且不越出圆环、建表索引与查表索引往返一致、0xFF 填充的描边不再溢出 u8；菜单层用 `GetMenuStringW`/`GetMenuState` 断言项顺序、勾选与灰显、项数预算与控制字符处理；重启流程另用一个**常驻**假控制器端到端跑（清 PID/句柄、替换 client、清 version——单发假服务器演不了）；i18n 层断言中英表键与占位符一一对应、随仓库分发的模板就是 `build.rs` 的生成物（比对构建脚本盖进二进制的指纹，手改生成段即失败）且逐条等于内置英文表、语言文件叠加与回退、替换不回扫（组名里的 `{kind}` 原样显示）；设置层断言子集解析的边界（BOM、撇号、引号内逗号、`page_size` 钳制、路径与 CJK 值），路径层断言 `%NAME%` 展开与绝对性判定，来源层断言内核候选链的顺序与"真 binary 优先于 shim"、配置候选的顺序（捆绑根 → 内核同目录 → mihomo 默认）与存在性挑选、控制器链的优先级（argv → 环境变量 → 配置文件 → `controller.*`）与运行内核 argv 的挑选规则。
 7. **界面文案集中到 `src/i18n.rs`**：原先前述文案散在 11 个文件里，现收进语言表（62 条），语言取 Windows UI 语言标签，`lang/<该标签>.yml` 叠加在内置表上。`settings::load` 相应改为返回结构化 `LoadError`，文案由调用方渲染——否则「读取 `tray.yml` 失败」本身没有语言可依。语言文件的解析**不复用** `settings::strip_comment`：它把空格后的 `#` 当注释、把未配对的引号当成开启的引号串，会静默截断 `Proxy #1` 这类译文，并把行尾注释当成译文显示。
    **模板由构建脚本生成**：`lang/en-US.yml` 的标记行以下部分是 `build.rs` 从 `src/i18n.rs` 重写出来的——键取自 `messages!` 列表（只有那里拼键名），值取自内置 `EN_US` 表，生成文本的 FNV-1a 指纹经 `cargo:rustc-env` 交给单测，手改生成段或改文案没重建都会让单测失败。标记行以上是手写说明，构建脚本原样保留。于是「新增或修改文案」只剩改 `src/i18n.rs` 一处，不再需要手工同步语言文件。
    **代价实测**：exe 由 337,920 B 增至 361,984 B（+24 KB，当时的数字），远高于动工前估的 3–4 KB——语言表本体、62 路 `overlay`、22 个渲染方法与解析器各占一块。读取用的 `HashMap` 已换成线性扫描（62 条只在启动读一次），省回 4.5 KB；读取路径改用 `Vec<(String, String)>` 后不再把 SipHash 与哈希表代码链进这个以 KB 计的项目。
@@ -382,7 +382,7 @@ ui:
 
 结果：exe 398,336 B → **336,896 B（−60.0 KiB，−15.4%）**，`.text` 291.0 → 239.5 KiB。仍高于 §2 的 250 KB 预算（那条是 Phase 0 的选型预算）。
 
-复查顺带记下、**本轮未处理**的几项，都属于便宜且独立的小改动：`Cargo.toml` 的 `Win32_Security` 实际被 `src/mihomo/proc.rs`（`SECURITY_ATTRIBUTES`，用于 `CreateFileW` 与进程启动）引用，不可删；`Cargo.lock` 里 `serde_derive`/`proc-macro2`/`syn`/`quote`/`unicode-ident` 仍由 `serde_core`（`serde_json` 依赖链）拉入构建图，不能单独去掉；`win/{mod,elevate,menu,shell}.rs` 各带一份 `wide()`；`std::env::var`（18 处）会把 `to_lowercase`（3.9 KiB）链进来，换 `GetEnvironmentVariableW` 可去掉。另有一项既有失败：`cargo test`（debug）下 `icon.rs:109` 的 `color * 3` u8 溢出使图标那项失败，`--release` 全绿——与本次改动无关，主树同样失败。（`lang/en-US.yml` 曾在列表里，现已由 `build.rs` 生成，见本节 §7。）
+复查顺带记下、**本轮未处理**的几项，都属于便宜且独立的小改动：`Cargo.toml` 的 `Win32_Security` 实际被 `src/mihomo/proc.rs`（`SECURITY_ATTRIBUTES`，用于 `CreateFileW` 与进程启动）引用，不可删；`Cargo.lock` 里 `serde_derive`/`proc-macro2`/`syn`/`quote`/`unicode-ident` 仍由 `serde_core`（`serde_json` 依赖链）拉入构建图，不能单独去掉；`win/{mod,elevate,menu,shell}.rs` 各带一份 `wide()`；`std::env::var`（18 处）会把 `to_lowercase`（3.9 KiB）链进来，换 `GetEnvironmentVariableW` 可去掉。（`lang/en-US.yml` 曾在列表里，现已由 `build.rs` 生成，见本节 §7。文中曾记的 `icon.rs` u8 溢出既有失败已由 `02d6017` 修掉，debug 与 release 都一样全绿。）
 
 ### 代码审查修复（第二轮，10 项 must-fix + 若干 should-fix）
 

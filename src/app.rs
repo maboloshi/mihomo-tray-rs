@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::i18n;
-use crate::icon::{Icons, State};
+use crate::icon::{Icons, Mode, State};
 use crate::mihomo::{Client, Providers, discover, proc};
 use crate::settings::Settings;
 use crate::state::{self, KernelSlot, Shared, Snapshot};
@@ -110,7 +110,10 @@ impl App {
 
     pub fn refresh_ui(&mut self) {
         let snapshot = state::read(&self.state);
-        let icon = self.icons.for_state(icon_state(&snapshot));
+        let icon = self.icons.for_state(
+            icon_state(&snapshot),
+            Mode::from_str(snapshot.mode.as_str()),
+        );
         if self.icon_ready {
             win::update_icon(self.hwnd, icon, &tooltip(&snapshot), false);
         } else {
@@ -127,7 +130,10 @@ impl App {
             return;
         }
         let snapshot = state::read(&self.state);
-        let icon = self.icons.for_state(icon_state(&snapshot));
+        let icon = self.icons.for_state(
+            icon_state(&snapshot),
+            Mode::from_str(snapshot.mode.as_str()),
+        );
         win::update_icon(self.hwnd, icon, &tooltip(&snapshot), true);
     }
 
@@ -140,7 +146,10 @@ impl App {
             self.icons = Icons::new();
         }
         let snapshot = state::read(&self.state);
-        let icon = self.icons.for_state(icon_state(&snapshot));
+        let icon = self.icons.for_state(
+            icon_state(&snapshot),
+            Mode::from_str(snapshot.mode.as_str()),
+        );
         self.icon_ready = win::add_icon(self.hwnd, icon, &tooltip(&snapshot));
     }
 
@@ -1159,11 +1168,12 @@ fn refresh(
     state::write(shared, snapshot);
 }
 
-/// What the icon shows, from what the last refresh saw.
+/// What the icon's ring shows, from what the last refresh saw.
 ///
 /// TUN beats the system proxy and both beat a kernel that only answers. A kernel
 /// that does not answer beats everything: a registry entry claiming the system
-/// proxy is on while nothing serves it is exactly what the user has to see.
+/// proxy is on while nothing serves it is exactly what the user has to see. The
+/// proxy mode is the icon's centre and an independent axis — see `icon::Mode`.
 fn icon_state(snapshot: &Snapshot) -> State {
     if !snapshot.controller_ok {
         State::Unreachable
