@@ -4,7 +4,7 @@
 //! posts commands to the worker, which refreshes the snapshot and pokes the UI
 //! window when it is done.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -62,6 +62,11 @@ pub struct App {
     pub hwnd: HWND,
     pub icons: Icons,
     pub menu_open: bool,
+    /// The `tray.yml` this run read, as resolved before the window existed (the
+    /// portable one beside the executable, else `%APPDATA%`). Kept because the
+    /// menu offers to open exactly that file, and re-resolving it at click time
+    /// could name a different one after the executable moved.
+    settings_path: PathBuf,
     /// The kernel this program may start or replace, as the worker found it: the
     /// path is what "exit and stop mihomo" matches against, and the handle is the
     /// instance this program launched itself.
@@ -74,13 +79,19 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(settings: Settings, state: Shared, fatal: Option<String>) -> Self {
+    pub fn new(
+        settings: Settings,
+        state: Shared,
+        settings_path: PathBuf,
+        fatal: Option<String>,
+    ) -> Self {
         Self {
             settings,
             state,
             hwnd: std::ptr::null_mut(),
             icons: Icons::new(),
             menu_open: false,
+            settings_path,
             kernel: state::kernel_slot(),
             tx: None,
             fatal,
@@ -164,6 +175,15 @@ impl App {
         post(self.hwnd as isize, win::WM_REFRESH);
     }
 
+    /// Hand a configuration file to its default handler. This runs on the UI
+    /// thread like the other shell calls; a refusal is reported in the menu's
+    /// error line rather than in a dialog.
+    fn open_file(&self, path: &Path) {
+        if let Err(error) = win::shell::open_path(path) {
+            self.set_error(error);
+        }
+    }
+
     pub fn dispatch(&mut self, action: &Action) {
         match action {
             Action::SetMode(mode) => self.send(Command::SetMode(mode.clone())),
@@ -193,6 +213,17 @@ impl App {
                 let url = state::read(&self.state).web_ui_url;
                 if let Err(error) = win::shell::open_url(&url) {
                     self.set_error(error);
+                }
+            }
+            // Both configuration files are local: neither the kernel nor its
+            // controller is needed to edit them, which is also why these are the
+            // two entries that keep the "more" submenu reachable on their own.
+            Action::OpenConfig => self.open_file(&self.settings_path),
+            Action::OpenMihomoConfig => {
+                // Resolved at startup by the same rule the kernel's own `-f`
+                // comes from; grayed while nothing could be named.
+                if let Some(path) = state::read(&self.state).mihomo_config {
+                    self.open_file(&path);
                 }
             }
             Action::ToggleSysProxy => {
@@ -393,6 +424,16 @@ fn startup(kernel: &KernelSlot, settings: &Settings, state: &Shared, hwnd: isize
         Some(i18n::t().status_looking_kernel.to_string()),
     );
     let startup = look_for_kernel(kernel, settings);
+    // The configuration file the kernel is told to read, resolved by the same
+    // rule its own `-f` comes from — one resolution, so the menu cannot open a
+    // file the kernel is not using. Recorded here rather than at click time for
+    // the same reason: the answer belongs to this run's kernel, and the UI thread
+    // only opens what it is handed.
+    let kernel_path = state::kernel_path(kernel);
+    let mihomo_config = discover::kernel_config(settings, kernel_path.as_deref())
+        .ok()
+        .flatten();
+    state::write_mihomo_config(state, mihomo_config);
     if !startup.started_kernel {
         // Either the discovery chain's answer or nothing: a declaration needs no
         // announcement, and a kernel started here has a note of its own.
@@ -1111,6 +1152,10 @@ fn refresh(
         action_error: previous.action_error,
         status_note: previous.status_note,
         kernel_pid: previous.kernel_pid,
+        // Resolved once at startup, from the same settings and the same kernel
+        // path this loop is still using: a refresh must not drop it, and has
+        // nothing newer to say about it.
+        mihomo_config: previous.mihomo_config,
         ..Default::default()
     };
 

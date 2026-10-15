@@ -223,7 +223,15 @@ fn declared_home(settings: &Settings) -> Result<Option<PathBuf>, String> {
 /// `mihomo.home`, else the file the kernel brings along, else `config.yaml` under
 /// mihomo's own default directory — the rule mihomo itself applies to an empty
 /// `-f`.
-fn kernel_config(settings: &Settings, kernel: Option<&Path>) -> Result<Option<PathBuf>, String> {
+///
+/// Public because it answers two callers that must not disagree: the launch
+/// command line, where it becomes the kernel's `-f`, and the tray's "open the
+/// mihomo config" entry, which has to open the file the kernel was started with.
+/// A second resolution would be a second answer.
+pub fn kernel_config(
+    settings: &Settings,
+    kernel: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
     kernel_config_with(settings, kernel, exe_dir().as_deref(), default_home())
 }
 

@@ -27,6 +27,13 @@ pub enum Action {
     Unfix(String),
     ToggleAutostart,
     Reload,
+    /// Open this program's own settings file (`tray.yml`) with its default
+    /// handler. The tray has no settings window, so this is where that file is
+    /// edited.
+    OpenConfig,
+    /// Open the configuration file the kernel was started with, resolved by the
+    /// same rule its own `-f` comes from.
+    OpenMihomoConfig,
     /// Drop every connection the kernel is proxying.
     CloseConnections,
     /// Restart the kernel process, keeping its own command line.
@@ -149,6 +156,26 @@ impl Menu {
             false,
             ready,
         );
+        // Both of these are local files: no controller and no running kernel are
+        // needed to edit them, which is what makes this submenu reachable on its
+        // own (see the popup below). The settings file exists from the first run
+        // on; the kernel's configuration file is a candidate mihomo resolves, so
+        // it may not exist yet — the shell then opens the directory it lives in,
+        // and only a path that could not be resolved at all is out of reach.
+        builder.item(
+            more_menu,
+            &messages.menu_open_config,
+            Action::OpenConfig,
+            false,
+            true,
+        );
+        builder.item(
+            more_menu,
+            &messages.menu_open_mihomo_config,
+            Action::OpenMihomoConfig,
+            false,
+            snapshot.mihomo_config.is_some(),
+        );
         // One entry per subscription. The label carries how old the nodes in use
         // are, which is the question this submenu answers; what a click does is
         // re-download that provider. Only vehicles with a source to read again are
@@ -203,13 +230,11 @@ impl Menu {
             false,
             snapshot.kernel_running,
         );
-        builder.popup(
-            root,
-            &messages.menu_more,
-            more_menu,
-            ready || snapshot.kernel_running,
-            false,
-        );
+        // Reachable with neither a controller nor a running kernel: "open the
+        // config file" is how a setup that starts up broken gets fixed, and it
+        // needs neither of them. Every entry that does need one is grayed out
+        // individually, so the submenu still tells the truth when it opens.
+        builder.popup(root, &messages.menu_more, more_menu, true, false);
 
         builder.separator(root);
         let exit_menu = builder.new_menu();
@@ -894,6 +919,8 @@ mod tests {
             labels(more),
             vec![
                 messages.menu_reload.to_string(),
+                messages.menu_open_config.to_string(),
+                messages.menu_open_mihomo_config.to_string(),
                 messages.menu_refresh_providers.to_string(),
                 messages.menu_close_connections.to_string(),
                 messages.menu_restart_kernel.to_string(),
@@ -905,14 +932,16 @@ mod tests {
             "reload config is a submenu entry now, not a root one"
         );
 
-        // Reloading and closing connections need a controller, replacing the kernel
-        // needs a kernel that is running: with neither, the submenu is out of reach.
+        // Opening a config file needs neither a controller nor a kernel, so the
+        // submenu stays reachable with neither and only the entries that do need
+        // one are grayed out — a setup that starts up broken is exactly when
+        // "open tray.yml" has to be within reach.
         let mut offline = snapshot(Vec::new());
         offline.controller_ok = false;
         let offline = Menu::build(&offline, &Settings::default());
         let position = submenu_position(offline.handle, &messages.menu_more).expect("more submenu");
         let state = unsafe { GetMenuState(offline.handle, position as u32, MF_BYPOSITION) };
-        assert_ne!(state & MF_GRAYED, 0, "no controller and no kernel");
+        assert_eq!(state & MF_GRAYED, 0, "no controller and no kernel");
 
         // A kernel that is running can be replaced without a controller, so the
         // submenu stays reachable and only the controller entries are grayed.
@@ -932,11 +961,64 @@ mod tests {
                 Action::Reload
                 | Action::CloseConnections
                 | Action::RestartKernel
-                | Action::RefreshProvider(_) => assert!(grayed, "{action:?}"),
-                Action::ForceRestartKernel => assert!(!grayed, "{action:?}"),
+                | Action::RefreshProvider(_)
+                // The fixture resolves no kernel configuration, so this one has
+                // nothing to open — a state a real run reaches only when nothing
+                // could be named at all.
+                | Action::OpenMihomoConfig => assert!(grayed, "{action:?}"),
+                Action::ForceRestartKernel | Action::OpenConfig => {
+                    assert!(!grayed, "{action:?}")
+                }
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn the_config_entries_follow_the_file_each_one_opens() {
+        let messages = i18n::t();
+        // Both entries carry a command of their own, reachable from the root
+        // menu only through the submenu they live in.
+        let mut resolved = snapshot(Vec::new());
+        resolved.mihomo_config = Some(std::path::PathBuf::from(r"C:\mihomo\config.yaml"));
+        let menu = Menu::build(&resolved, &Settings::default());
+        let more = find_submenu(menu.handle, &messages.menu_more);
+        assert!(!more.is_null(), "more submenu missing");
+
+        let state_of = |action: &Action| {
+            let index = menu
+                .actions
+                .iter()
+                .position(|candidate| candidate == action)
+                .expect("the entry exists");
+            unsafe { GetMenuState(more, (ID_BASE + index) as u32, MF_BYCOMMAND) }
+        };
+        assert_eq!(
+            state_of(&Action::OpenConfig) & MF_GRAYED,
+            0,
+            "the settings file is written on the first run and always openable"
+        );
+        assert_eq!(
+            state_of(&Action::OpenMihomoConfig) & MF_GRAYED,
+            0,
+            "a resolved kernel configuration is openable"
+        );
+
+        // Nothing resolved (no declaration and no `%USERPROFILE%`): the shell has
+        // no path to hand over, so the entry is out of reach instead of failing
+        // on click. The settings file is unaffected.
+        let bare = Menu::build(&snapshot(Vec::new()), &Settings::default());
+        let more = find_submenu(bare.handle, &messages.menu_more);
+        let state_of = |action: &Action| {
+            let index = bare
+                .actions
+                .iter()
+                .position(|candidate| candidate == action)
+                .expect("the entry exists");
+            unsafe { GetMenuState(more, (ID_BASE + index) as u32, MF_BYCOMMAND) }
+        };
+        assert_ne!(state_of(&Action::OpenMihomoConfig) & MF_GRAYED, 0);
+        assert_eq!(state_of(&Action::OpenConfig) & MF_GRAYED, 0);
     }
 
     #[test]

@@ -86,6 +86,12 @@ pub struct Snapshot {
     /// worker found. Resolved on the worker thread because that is where the
     /// controller's address lives; the UI thread only opens what it is handed.
     pub web_ui_url: String,
+    /// The configuration file the kernel is told to read (`-f`), resolved at
+    /// startup by the very rule the kernel's own `-f` comes from — the menu entry
+    /// that opens it has to hand over that file, not a second guess at it. `None`
+    /// when nothing could be named at all (nothing declared and no
+    /// `%USERPROFILE%`), which is the only case where the entry is grayed out.
+    pub mihomo_config: Option<PathBuf>,
 }
 
 impl Snapshot {
@@ -169,6 +175,16 @@ pub fn write_kernel_pid(state: &Shared, pid: Option<u32>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .kernel_pid = pid;
+}
+
+/// Record the configuration file the kernel reads, for the menu entry that opens
+/// it. Resolved once at startup, next to the kernel path it is resolved against;
+/// a later refresh carries it over like the other startup facts.
+pub fn write_mihomo_config(state: &Shared, path: Option<PathBuf>) {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .mihomo_config = path;
 }
 
 /// The kernel was started here and has not answered the controller yet: the

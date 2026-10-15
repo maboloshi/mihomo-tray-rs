@@ -70,6 +70,8 @@ messages! {
     menu_empty => "menu.empty",
     menu_autostart => "menu.autostart",
     menu_reload => "menu.reload",
+    menu_open_config => "menu.open_config",
+    menu_open_mihomo_config => "menu.open_mihomo_config",
     menu_close_connections => "menu.close_connections",
     menu_restart_kernel => "menu.restart_kernel",
     menu_force_restart_kernel => "menu.force_restart_kernel",
@@ -152,6 +154,7 @@ messages! {
     error_kernel_args => "error.kernel_args",
     error_message_window => "error.message_window",
     error_open_web_ui_tpl => "error.open_web_ui",
+    error_open_file_tpl => "error.open_file",
     error_open_internet_settings_tpl => "error.open_internet_settings",
     error_set_proxy_enable_tpl => "error.set_proxy_enable",
     error_set_proxy_server_tpl => "error.set_proxy_server",
@@ -426,6 +429,12 @@ impl Messages {
         self.fill(&self.error_open_web_ui_tpl, &[("code", code)])
     }
 
+    /// The path is part of the report: the file the menu offered to open is
+    /// exactly what the user has to look at when the shell refused it.
+    pub fn error_open_file(&self, path: &str, code: &str) -> String {
+        self.fill(&self.error_open_file_tpl, &[("path", path), ("code", code)])
+    }
+
     pub fn error_open_internet_settings(&self, error: &str) -> String {
         self.fill(&self.error_open_internet_settings_tpl, &[("error", error)])
     }
@@ -465,6 +474,8 @@ static ZH_CN: Messages = Messages {
     menu_empty: Cow::Borrowed("(空)"),
     menu_autostart: Cow::Borrowed("开机自启动"),
     menu_reload: Cow::Borrowed("重载配置"),
+    menu_open_config: Cow::Borrowed("打开配置文件"),
+    menu_open_mihomo_config: Cow::Borrowed("打开 mihomo 配置文件"),
     menu_close_connections: Cow::Borrowed("关闭所有连接"),
     menu_restart_kernel: Cow::Borrowed("重启内核"),
     menu_force_restart_kernel: Cow::Borrowed("强制重启内核"),
@@ -555,6 +566,7 @@ static ZH_CN: Messages = Messages {
     error_open_web_ui_tpl: Cow::Borrowed(
         "打开 Web 面板失败: 无法用默认浏览器打开（ShellExecute 返回 {code}）",
     ),
+    error_open_file_tpl: Cow::Borrowed("打开 {path} 失败（ShellExecute 返回 {code}）"),
     error_open_internet_settings_tpl: Cow::Borrowed("打开 Internet Settings 失败: {error}"),
     error_set_proxy_enable_tpl: Cow::Borrowed("设置 ProxyEnable 失败: {error}"),
     error_set_proxy_server_tpl: Cow::Borrowed("设置 ProxyServer 失败: {error}"),
@@ -587,6 +599,8 @@ static EN_US: Messages = Messages {
     menu_empty: Cow::Borrowed("(empty)"),
     menu_autostart: Cow::Borrowed("Start with Windows"),
     menu_reload: Cow::Borrowed("Reload config"),
+    menu_open_config: Cow::Borrowed("Open config file"),
+    menu_open_mihomo_config: Cow::Borrowed("Open mihomo config file"),
     menu_close_connections: Cow::Borrowed("Close all connections"),
     menu_restart_kernel: Cow::Borrowed("Restart kernel"),
     menu_force_restart_kernel: Cow::Borrowed("Force restart kernel"),
@@ -699,6 +713,7 @@ static EN_US: Messages = Messages {
     error_open_web_ui_tpl: Cow::Borrowed(
         "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})",
     ),
+    error_open_file_tpl: Cow::Borrowed("Failed to open {path} (ShellExecute returned {code})"),
     error_open_internet_settings_tpl: Cow::Borrowed("Failed to open Internet Settings: {error}"),
     error_set_proxy_enable_tpl: Cow::Borrowed("Failed to set ProxyEnable: {error}"),
     error_set_proxy_server_tpl: Cow::Borrowed("Failed to set ProxyServer: {error}"),

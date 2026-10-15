@@ -34,6 +34,8 @@ menu:
   empty: (empty)
   autostart: Start with Windows
   reload: Reload config
+  open_config: Open config file
+  open_mihomo_config: Open mihomo config file
   close_connections: Close all connections
   restart_kernel: Restart kernel
   force_restart_kernel: Force restart kernel
@@ -122,6 +124,7 @@ error:
   kernel_args: Could not read the kernel's own command line, so it was not restarted
   message_window: Failed to create the message window
   open_web_ui: "Failed to open the web dashboard: could not launch the default browser (ShellExecute returned {code})"
+  open_file: Failed to open {path} (ShellExecute returned {code})
   open_internet_settings: "Failed to open Internet Settings: {error}"
   set_proxy_enable: "Failed to set ProxyEnable: {error}"
   set_proxy_server: "Failed to set ProxyServer: {error}"

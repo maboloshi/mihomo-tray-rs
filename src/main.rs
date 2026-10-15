@@ -44,7 +44,12 @@ fn main() {
     // a raw pointer to it, and the process exits as a unit. Finding and starting
     // the kernel is not done here: the worker does that once the icon exists.
     let shared = state::shared();
-    let app = Box::into_raw(Box::new(App::new(settings.clone(), shared, fatal)));
+    let app = Box::into_raw(Box::new(App::new(
+        settings.clone(),
+        shared,
+        settings_path,
+        fatal,
+    )));
 
     unsafe {
         match win::create_message_window(app) {
