@@ -41,11 +41,11 @@ cargo test                 # 设置解析 / URL 编码 / 地址解析的单测
 
 `[profile.release]` 使用 `opt-level="z" + lto + codegen-units=1 + panic="abort" + strip`，并**不做**任何压缩打包。应用清单（Common-Controls v6 + supportedOS Win10/11 + per-monitor-v2 DPI）由 `build.rs` 用纯 linker 参数嵌入，决定菜单的圆角/主题/DPI 是否正确。
 
-实测（本机 Win11 x64，rustc 1.98.0，release 构建后冷启动 20 s 的读数）：
+本机 Win11 x64 的 release 冷启动 20 s 读数（只给量级：同一份源码换个 rustc 就有几 KB 出入，精确到字节的数字会过时）：
 
 | 指标 | 数值 |
 |---|---|
-| 可执行文件 | ~347.5 KiB (实测 355,840 B) |
+| 可执行文件 | ~350 KiB（strip 后） |
 | 空闲私有内存 | ~2.2 MB（私有工作集；总私有提交 ~2.8 MB，含 WinHTTP 内部线程） |
 | 空闲工作集 | ~15 MB（多为共享 DLL 页） |
 | 依赖 | `windows-sys`、`serde_json`、`winreg`（+ 构建期无依赖） |
